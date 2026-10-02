@@ -23,7 +23,7 @@ struct SixtyFourEditApp: App {
 
     var body: some Scene {
         DocumentGroup(newDocument: ForthDocument()) { file in
-            ContentView(document: file.$document)
+            ContentView(document: file.$document, fileURL: file.fileURL)
                 .environmentObject(forth)
                 .onAppear { forth.start() }
         }

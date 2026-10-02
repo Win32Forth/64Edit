@@ -9,21 +9,25 @@ import SwiftUI
 
 struct ContentView: View {
     @Binding var document: ForthDocument
+    var fileURL: URL?
     @AppStorage("editorFontSize") private var fontSize = 13.0
     @AppStorage("editorWrap") private var wrapLines = false
     @EnvironmentObject private var forth: ForthConnectionManager
     @State private var commandLine = ""
-    
+    @State private var gotoLine: Int?
+    @State private var gotoObserver: NSObjectProtocol?
+
     var body: some View {
         VStack(spacing: 0) {
             EditorTextView(
                 text: $document.text,
                 fontSize: fontSize,
-                wrap: wrapLines
+                wrap: wrapLines,
+                gotoLine: $gotoLine
             )
-            
+
             Divider()
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(forth.isConnected ? "Engine connected" : "Engine down")
@@ -50,7 +54,7 @@ struct ContentView: View {
                         if let last = forth.consoleLines.indices.last {
                             proxy.scrollTo(last, anchor: .bottom)
                         }
-                    }                    
+                    }
                 }
                 HStack {
                     TextField("Forth command", text: $commandLine)
@@ -64,17 +68,60 @@ struct ContentView: View {
             .padding(8)
             .frame(minHeight: 120, maxHeight: 180)
         }
+        .onAppear {
+            installGotoObserver()
+            applyPendingGoto()
+        }
+        .onDisappear {
+            if let gotoObserver {
+                DistributedNotificationCenter.default().removeObserver(gotoObserver)
+                self.gotoObserver = nil
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            applyPendingGoto()
+        }
     }
-    
+
     private func sendCommand() {
         let cmd = commandLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cmd.isEmpty else { return }
         forth.send(.executeCommand(command: cmd))
         commandLine = ""
     }
+
+    private func applyPendingGoto() {
+        if let line = PendingGoto.consumeIfMatches(documentPath: fileURL?.path) {
+            gotoLine = line
+        }
+    }
+
+    private func installGotoObserver() {
+        guard gotoObserver == nil else { return }
+        gotoObserver = DistributedNotificationCenter.default().addObserver(
+            forName: PendingGoto.notificationName,
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let info = note.userInfo,
+                  let path = info["path"] as? String,
+                  let line = info["line"] as? Int,
+                  line > 0,
+                  let url = fileURL,
+                  PendingGoto.pathsMatch(url.path, path)
+            else {
+                applyPendingGoto()
+                return
+            }
+            _ = PendingGoto.consume()
+            gotoLine = line
+        }
+    }
 }
 
 #Preview {
-    ContentView(document: .constant(ForthDocument()))
+    ContentView(document: .constant(ForthDocument()), fileURL: nil)
         .environmentObject(ForthConnectionManager())
 }

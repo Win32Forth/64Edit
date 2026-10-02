@@ -12,16 +12,18 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat
     var wrap: Bool
-    
+    /// 1-based line to reveal once; ContentView clears after apply.
+    @Binding var gotoLine: Int?
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    
+
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        
+
         let tv = NSTextView()
         tv.delegate = context.coordinator
         tv.isRichText = false
@@ -43,17 +45,17 @@ struct EditorTextView: NSViewRepresentable {
         )
         tv.textContainer?.widthTracksTextView = wrap
         tv.autoresizingMask = wrap ? [.width] : []
-        
+
         scroll.documentView = tv
         context.coordinator.textView = tv
         return scroll
     }
-    
+
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let tv = scroll.documentView as? NSTextView else { return }
         if tv.string != text { tv.string = text }
         tv.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        
+
         tv.isHorizontallyResizable = !wrap
         tv.autoresizingMask = wrap ? [.width] : []
         tv.textContainer?.widthTracksTextView = wrap
@@ -68,13 +70,22 @@ struct EditorTextView: NSViewRepresentable {
                 height: CGFloat.greatestFiniteMagnitude
             )
         }
+
+        if let line = gotoLine, line > 0 {
+            DispatchQueue.main.async {
+                PendingGoto.scroll(tv, toLine: line)
+                if context.coordinator.parent.gotoLine == line {
+                    context.coordinator.parent.gotoLine = nil
+                }
+            }
+        }
     }
-    
+
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: EditorTextView
         weak var textView: NSTextView?
         init(_ parent: EditorTextView) { self.parent = parent }
-        
+
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             parent.text = tv.string
