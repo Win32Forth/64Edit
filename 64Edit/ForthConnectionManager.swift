@@ -15,9 +15,19 @@ final class ForthConnectionManager: NSObject, ObservableObject {
             .appendingPathComponent("edit.sock")
     }
 
+    struct DebugLocation: Equatable {
+        var path: String
+        /// 1-based line from the word's VIEW stamp.
+        var line: Int
+    }
+
     @Published private(set) var isConnected = false
     @Published private(set) var lastError: String?
     @Published private(set) var consoleLines: [String] = []
+    /// True while 64Forth ITC DEBUG / TDBG is waiting for step/continue/abort.
+    @Published private(set) var isDebugSessionArmed = false
+    /// Latest paused-word VIEW location from 64Forth (nil when not debugging).
+    @Published private(set) var debugLocation: DebugLocation?
 
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -81,6 +91,32 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         readSource = nil
         fd = -1
         isConnected = false
+        isDebugSessionArmed = false
+        debugLocation = nil
+    }
+
+    func stepOver() { send(.stepOver) }
+    func stepInto() { send(.stepInto) }
+    func resumeDebug() { send(.resume) }
+    func stopDebug() { send(.stop) }
+
+    /// Reconnect check only — does not evaluate Forth (safe while DEBUG is paused).
+    func ping() {
+        if fd >= 0, !isConnected {
+            stop()
+        }
+        if fd < 0 {
+            start()
+        }
+        if isConnected {
+            lastError = nil
+            let note = isDebugSessionArmed ? "pong · debugging" : "pong"
+            appendConsole(note)
+        } else if let err = lastError {
+            appendConsole("ping failed: \(err)")
+        } else {
+            appendConsole("ping failed")
+        }
     }
 
     func send(_ request: EditorRequest) {
@@ -112,6 +148,8 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         if n <= 0 {
             DispatchQueue.main.async {
                 self.isConnected = false
+                self.isDebugSessionArmed = false
+                self.debugLocation = nil
                 self.lastError = "64Forth connection closed"
             }
             readSource?.cancel()
@@ -156,6 +194,13 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         case .error(let message):
             lastError = message
             appendConsole("Error: \(message)")
+        case .debugSession(let armed):
+            isDebugSessionArmed = armed
+            if !armed {
+                debugLocation = nil
+            }
+        case .debugLocation(let path, let line):
+            debugLocation = DebugLocation(path: path, line: line)
         }
     }
 

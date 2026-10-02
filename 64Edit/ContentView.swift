@@ -63,6 +63,10 @@ struct ContentView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+                if forth.isDebugSessionArmed {
+                    DebugToolbar(forth: forth)
+                }
+
                 ConsoleSplitter(
                     onDrag: { translationY in
                         let base = dragStartHeight ?? clampedConsole
@@ -113,15 +117,23 @@ struct ContentView: View {
                 scheduleApplyPendingGoto()
             }
         }
+        .onChange(of: forth.debugLocation) { _, loc in
+            guard let loc else { return }
+            applyDebugLocation(loc)
+        }
     }
 
     private var consolePane: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(forth.isConnected ? "Engine connected" : "Engine down")
+                if forth.isDebugSessionArmed {
+                    Text("· debugging")
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
                 Button("Ping") {
-                    forth.send(.executeCommand(command: "WORDS"))
+                    forth.ping()
                 }
             }
             if let err = forth.lastError {
@@ -188,6 +200,18 @@ struct ContentView: View {
         }
     }
 
+    /// Sock `debugLocation`: scroll this window when it already shows the paused file.
+    private func applyDebugLocation(_ loc: ForthConnectionManager.DebugLocation) {
+        let candidates = PendingGoto.candidatePaths(explicit: fileURL, window: nil)
+        guard candidates.contains(where: { PendingGoto.pathsMatch($0, loc.path) }) else {
+            return
+        }
+        isViewMode = true
+        if loc.line > 0 {
+            gotoLine = loc.line
+        }
+    }
+
     private func installGotoObserver() {
         guard gotoObserver == nil else { return }
         gotoObserver = DistributedNotificationCenter.default().addObserver(
@@ -199,6 +223,48 @@ struct ContentView: View {
             gotoApplied = false
             scheduleApplyPendingGoto()
         }
+    }
+}
+
+/// Shown while 64Forth ITC DEBUG / TDBG is armed; hidden otherwise.
+private struct DebugToolbar: View {
+    @ObservedObject var forth: ForthConnectionManager
+
+    /// Pale green when sock is up; pale orange when armed but disconnected.
+    private var barColor: Color {
+        forth.isConnected
+            ? Color.green.opacity(0.18)
+            : Color.orange.opacity(0.18)
+    }
+
+    private var accent: Color {
+        forth.isConnected ? .green : .orange
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "ladybug.fill")
+                .foregroundStyle(accent)
+            Text("Debug")
+                .fontWeight(.semibold)
+            Spacer(minLength: 8)
+            // No bare letter shortcuts — they would steal typing from the editor
+            // and command field. F6/F7/g/q still work in the 64Forth console.
+            Button("Step Over") { forth.stepOver() }
+            Button("Step Into") { forth.stepInto() }
+            Button("Continue") { forth.resumeDebug() }
+            Button("Stop") { forth.stopDebug() }
+                .foregroundStyle(.red)
+        }
+        .font(.system(size: 11))
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity)
+        .background(barColor)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Debug toolbar")
     }
 }
 
