@@ -208,6 +208,8 @@ struct EditorTextView: NSViewRepresentable {
                 alert.alertStyle = .informational
                 alert.addButton(withTitle: "Yes")
                 alert.addButton(withTitle: "No")
+                // Esc dismisses like No (stay in view mode).
+                alert.buttons.last?.keyEquivalent = "\u{1b}"
                 let response = alert.runModal()
                 if response == .alertFirstButtonReturn {
                     self.parent.isViewMode = false
