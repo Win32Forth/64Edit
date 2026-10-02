@@ -6,71 +6,95 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct ContentView: View {
     @Binding var document: ForthDocument
     var fileURL: URL?
     @AppStorage("editorFontSize") private var fontSize = 13.0
     @AppStorage("editorWrap") private var wrapLines = false
+    /// Height of the Forth console pane; drag the splitter to change it.
+    @AppStorage("consolePaneHeight") private var consoleHeight = 160.0
     @EnvironmentObject private var forth: ForthConnectionManager
     @State private var commandLine = ""
     @State private var gotoLine: Int?
+    @State private var isViewMode = false
     @State private var gotoObserver: NSObjectProtocol?
+    @State private var gotoApplied = false
+    @State private var dragStartHeight: CGFloat?
+
+    private static let consoleMinHeight: CGFloat = 88
+    private static let editorMinHeight: CGFloat = 120
 
     var body: some View {
-        VStack(spacing: 0) {
-            EditorTextView(
-                text: $document.text,
-                fontSize: fontSize,
-                wrap: wrapLines,
-                gotoLine: $gotoLine
+        GeometryReader { geo in
+            let maxConsole = max(
+                Self.consoleMinHeight,
+                geo.size.height - Self.editorMinHeight - ConsoleSplitter.height
             )
+            let clampedConsole = min(max(consoleHeight, Self.consoleMinHeight), maxConsole)
 
-            Divider()
+            VStack(spacing: 0) {
+                if isViewMode {
+                    HStack(spacing: 8) {
+                        Text("View mode")
+                            .fontWeight(.semibold)
+                        Text("Read-only — typing asks to switch to Edit")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Edit") {
+                            isViewMode = false
+                        }
+                        .keyboardShortcut("e", modifiers: [.command, .shift])
+                    }
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.yellow.opacity(0.22))
+                }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(forth.isConnected ? "Engine connected" : "Engine down")
-                    Spacer()
-                    Button("Ping") {
-                        forth.send(.executeCommand(command: "WORDS"))
-                    }
-                }
-                if let err = forth.lastError {
-                    Text(err)
-                        .foregroundStyle(.red)
-                }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(forth.consoleLines.enumerated()), id: \.offset) { index, line in
-                                Text(line)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(index)
-                            }
-                        }
-                    }
-                    .onChange(of: forth.consoleLines.count) { _, _ in
-                        if let last = forth.consoleLines.indices.last {
-                            proxy.scrollTo(last, anchor: .bottom)
-                        }
-                    }
-                }
-                HStack {
-                    TextField("Forth command", text: $commandLine)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(sendCommand)
-                    Button("Send", action: sendCommand)
-                        .disabled(commandLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                EditorTextView(
+                    text: $document.text,
+                    fontSize: fontSize,
+                    wrap: wrapLines,
+                    gotoLine: $gotoLine,
+                    isViewMode: $isViewMode
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                ConsoleSplitter(
+                    onDrag: { translationY in
+                        let base = dragStartHeight ?? clampedConsole
+                        if dragStartHeight == nil { dragStartHeight = clampedConsole }
+                        let next = min(
+                            max(base - translationY, Self.consoleMinHeight),
+                            maxConsole
+                        )
+                        consoleHeight = next
+                    },
+                    onEnd: { dragStartHeight = nil }
+                )
+
+                consolePane
+                    .frame(height: clampedConsole)
+            }
+            .onChange(of: geo.size.height) { _, _ in
+                // Keep stored height inside the new window bounds.
+                if consoleHeight > maxConsole {
+                    consoleHeight = maxConsole
                 }
             }
-            .font(.system(size: 12, design: .monospaced))
-            .padding(8)
-            .frame(minHeight: 120, maxHeight: 180)
         }
+        .background(WindowPathReader { window in
+            // DocumentGroup often leaves fileURL nil; representedURL arrives with the window.
+            if !gotoApplied {
+                applyPendingGoto(window: window)
+            }
+        })
         .onAppear {
             installGotoObserver()
-            applyPendingGoto()
+            scheduleApplyPendingGoto()
         }
         .onDisappear {
             if let gotoObserver {
@@ -81,8 +105,57 @@ struct ContentView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
         ) { _ in
-            applyPendingGoto()
+            scheduleApplyPendingGoto()
         }
+        .onChange(of: document.text) { _, newText in
+            // DocumentGroup often delivers fileURL/text after first appear.
+            if !newText.isEmpty {
+                scheduleApplyPendingGoto()
+            }
+        }
+    }
+
+    private var consolePane: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(forth.isConnected ? "Engine connected" : "Engine down")
+                Spacer()
+                Button("Ping") {
+                    forth.send(.executeCommand(command: "WORDS"))
+                }
+            }
+            if let err = forth.lastError {
+                Text(err)
+                    .foregroundStyle(.red)
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(forth.consoleLines.enumerated()), id: \.offset) { index, line in
+                            Text(line)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(index)
+                        }
+                    }
+                }
+                .onChange(of: forth.consoleLines.count) { _, _ in
+                    if let last = forth.consoleLines.indices.last {
+                        proxy.scrollTo(last, anchor: .bottom)
+                    }
+                }
+            }
+            HStack {
+                TextField("Forth command", text: $commandLine)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(sendCommand)
+                Button("Send", action: sendCommand)
+                    .disabled(commandLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .font(.system(size: 12, design: .monospaced))
+        .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private func sendCommand() {
@@ -92,9 +165,26 @@ struct ContentView: View {
         commandLine = ""
     }
 
-    private func applyPendingGoto() {
-        if let line = PendingGoto.consumeIfMatches(documentPath: fileURL?.path) {
-            gotoLine = line
+    /// Retry a few times: fileURL and document text can lag DocumentGroup open.
+    private func scheduleApplyPendingGoto() {
+        applyPendingGoto(window: nil)
+        for delay in [0.05, 0.15, 0.4, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                applyPendingGoto(window: nil)
+            }
+        }
+    }
+
+    private func applyPendingGoto(window: NSWindow?) {
+        guard !gotoApplied else { return }
+        let candidates = PendingGoto.candidatePaths(explicit: fileURL, window: window)
+        guard !candidates.isEmpty else { return }
+        if let pending = PendingGoto.consumeIfMatches(candidates: candidates) {
+            gotoApplied = true
+            isViewMode = pending.viewMode
+            if pending.line > 0 {
+                gotoLine = pending.line
+            }
         }
     }
 
@@ -104,20 +194,71 @@ struct ContentView: View {
             forName: PendingGoto.notificationName,
             object: nil,
             queue: .main
-        ) { note in
-            guard let info = note.userInfo,
-                  let path = info["path"] as? String,
-                  let line = info["line"] as? Int,
-                  line > 0,
-                  let url = fileURL,
-                  PendingGoto.pathsMatch(url.path, path)
-            else {
-                applyPendingGoto()
-                return
-            }
-            _ = PendingGoto.consume()
-            gotoLine = line
+        ) { _ in
+            // userInfo is not delivered across processes; always use the pending file.
+            gotoApplied = false
+            scheduleApplyPendingGoto()
         }
+    }
+}
+
+/// Drag handle between editor and console; drag up to grow the console.
+private struct ConsoleSplitter: View {
+    static let height: CGFloat = 6
+
+    var onDrag: (CGFloat) -> Void
+    var onEnd: () -> Void
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+            Rectangle()
+                .fill(Color.clear)
+                .frame(height: Self.height)
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    if inside {
+                        NSCursor.resizeUpDown.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            onDrag(value.translation.height)
+                        }
+                        .onEnded { _ in
+                            onEnd()
+                        }
+                )
+        }
+        .frame(height: Self.height)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Resize console")
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// Reads the hosting NSWindow so we can use representedURL when fileURL is nil.
+private struct WindowPathReader: NSViewRepresentable {
+    var onResolve: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { publish(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { publish(from: nsView) }
+    }
+
+    private func publish(from view: NSView) {
+        guard let window = view.window else { return }
+        onResolve(window)
     }
 }
 
