@@ -154,4 +154,210 @@ enum PendingGoto {
         tv.window?.makeFirstResponder(tv)
         return true
     }
+
+    /// 1-based line of the caret (or 1 if empty).
+    static func lineNumber(atCaretIn tv: NSTextView) -> Int? {
+        let ns = tv.string as NSString
+        guard ns.length > 0 else { return 1 }
+        let loc = min(tv.selectedRange().location, max(0, ns.length - 1))
+        var line = 1
+        var idx = 0
+        while idx < loc {
+            let para = ns.paragraphRange(for: NSRange(location: idx, length: 0))
+            let next = NSMaxRange(para)
+            if next <= idx { break }
+            if next > loc { break }
+            idx = next
+            line += 1
+        }
+        return line
+    }
+
+    /// UTF-16 index of the start of 1-based `line`, or `ns.length` if past end.
+    static func startIndex(ofLine line: Int, in ns: NSString) -> Int {
+        guard line > 1, ns.length > 0 else { return 0 }
+        var current = 1
+        var idx = 0
+        while current < line && idx < ns.length {
+            let para = ns.paragraphRange(for: NSRange(location: idx, length: 0))
+            let next = NSMaxRange(para)
+            if next <= idx { break }
+            idx = next
+            current += 1
+        }
+        return idx
+    }
+
+    /// Whole-word match of `name` inside the colon definition that starts at
+    /// `nearLine` (VIEW line). Does not search the rest of the file.
+    ///
+    /// Runtime peeks that never appear in source (EXIT, (S"), 0BRANCH, …) are
+    /// remapped to source spellings — same idea as `Debugger/dbg-map.fth`.
+    static func findWholeWord(_ name: String, in text: String, nearLine: Int) -> NSRange? {
+        let needle = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let ns = text as NSString
+        guard ns.length > 0 else { return nil }
+        let window = definitionSearchRange(nearLine: nearLine, in: ns)
+        guard window.length > 0 else { return nil }
+        let from = window.location
+        let to = NSMaxRange(window)
+        for (cand, opts) in highlightNeedles(for: needle) {
+            if let hit = firstWholeWord(cand, in: ns, from: from, to: to, options: opts) {
+                return hit
+            }
+        }
+        return nil
+    }
+
+    /// Search needles for a peek token. Runtime names map to source spellings
+    /// (dbg-map / SEE order). First match inside the definition window wins.
+    private static func highlightNeedles(
+        for name: String
+    ) -> [(String, NSString.CompareOptions)] {
+        let ci: NSString.CompareOptions = [.caseInsensitive, .literal]
+        let lit: NSString.CompareOptions = [.literal]
+        func pair(_ s: String, _ o: NSString.CompareOptions = ci) -> (String, NSString.CompareOptions) {
+            (s, o)
+        }
+        switch name.uppercased() {
+        case "EXIT":
+            // Compiled from `;`; prefer semicolon then explicit EXIT.
+            return [pair(";", lit), pair("EXIT")]
+        case "(S\")":
+            // Runtime for S" and ." (SLIT).
+            return [pair("S\"", lit), pair(".\"", lit)]
+        case "(C\")":
+            return [pair("C\"", lit)]
+        case "0BRANCH":
+            return [pair("IF"), pair("WHILE"), pair("UNTIL")]
+        case "BRANCH":
+            return [pair("ELSE"), pair("AGAIN"), pair("REPEAT")]
+        case "(DO)":
+            return [pair("DO")]
+        case "(?DO)":
+            return [pair("?DO", lit)]
+        case "(LOOP)":
+            return [pair("LOOP")]
+        case "(+LOOP)":
+            return [pair("+LOOP", lit)]
+        case "LIT":
+            // Source has a number / [CHAR] / ['] — needs payload or maps.
+            // Keep LIT last so an explicit LIT in comments still matches.
+            return [pair("[']", lit), pair("[CHAR]"), pair("LIT")]
+        default:
+            return [pair(name)]
+        }
+    }
+
+    /// Byte range of the colon definition at `nearLine`: from the line start
+    /// through its closing `;`, or up to the next top-level `:` if none.
+    private static func definitionSearchRange(nearLine: Int, in ns: NSString) -> NSRange {
+        let from = startIndex(ofLine: max(nearLine, 1), in: ns)
+        guard from < ns.length else {
+            return NSRange(location: from, length: 0)
+        }
+        if let semi = firstWholeWord(";", in: ns, from: from, to: ns.length, options: [.literal]) {
+            return NSRange(location: from, length: NSMaxRange(semi) - from)
+        }
+        let nextDef = nextDefinitionStart(after: from, in: ns) ?? ns.length
+        return NSRange(location: from, length: max(0, nextDef - from))
+    }
+
+    /// Start index of the next line whose first non-blank character is `:`.
+    private static func nextDefinitionStart(after from: Int, in ns: NSString) -> Int? {
+        var idx = from
+        // Skip the remainder of the line that contains `from`.
+        while idx < ns.length {
+            let ch = ns.character(at: idx)
+            idx += 1
+            if ch == 10 || ch == 13 { break }
+        }
+        while idx < ns.length {
+            let lineStart = idx
+            var j = idx
+            while j < ns.length {
+                let ch = ns.character(at: j)
+                if ch == 32 || ch == 9 { j += 1; continue }
+                break
+            }
+            if j < ns.length, ns.character(at: j) == 58 /* ':' */ {
+                let after = j + 1
+                if after >= ns.length || isWordBoundary(after: after, in: ns)
+                    || ns.character(at: after) == 32 || ns.character(at: after) == 9 {
+                    return lineStart
+                }
+            }
+            while idx < ns.length {
+                let ch = ns.character(at: idx)
+                idx += 1
+                if ch == 10 || ch == 13 { break }
+            }
+        }
+        return nil
+    }
+
+    private static let forthSeparators = CharacterSet.whitespacesAndNewlines
+
+    private static func isWordBoundary(before index: Int, in ns: NSString) -> Bool {
+        if index <= 0 { return true }
+        let scalars = ns.substring(with: NSRange(location: index - 1, length: 1)).unicodeScalars
+        guard let s = scalars.first else { return true }
+        return forthSeparators.contains(s)
+    }
+
+    private static func isWordBoundary(after end: Int, in ns: NSString) -> Bool {
+        if end >= ns.length { return true }
+        let scalars = ns.substring(with: NSRange(location: end, length: 1)).unicodeScalars
+        guard let s = scalars.first else { return true }
+        return forthSeparators.contains(s)
+    }
+
+    private static func firstWholeWord(
+        _ needle: String,
+        in ns: NSString,
+        from: Int,
+        to: Int,
+        options: NSString.CompareOptions
+    ) -> NSRange? {
+        var searchStart = from
+        let needleLen = (needle as NSString).length
+        while searchStart < to {
+            let hay = NSRange(location: searchStart, length: to - searchStart)
+            let found = ns.range(of: needle, options: options, range: hay)
+            guard found.location != NSNotFound else { return nil }
+            let end = NSMaxRange(found)
+            if isWordBoundary(before: found.location, in: ns),
+               isWordBoundary(after: end, in: ns) {
+                return found
+            }
+            searchStart = found.location + max(1, needleLen)
+        }
+        return nil
+    }
+
+    private static func lastWholeWord(
+        _ needle: String,
+        in ns: NSString,
+        from: Int,
+        to: Int,
+        options: NSString.CompareOptions
+    ) -> NSRange? {
+        var last: NSRange?
+        var searchStart = from
+        let needleLen = (needle as NSString).length
+        while searchStart < to {
+            let hay = NSRange(location: searchStart, length: to - searchStart)
+            let found = ns.range(of: needle, options: options, range: hay)
+            guard found.location != NSNotFound, found.location < to else { break }
+            let end = NSMaxRange(found)
+            if end <= to,
+               isWordBoundary(before: found.location, in: ns),
+               isWordBoundary(after: end, in: ns) {
+                last = found
+            }
+            searchStart = found.location + max(1, needleLen)
+        }
+        return last
+    }
 }

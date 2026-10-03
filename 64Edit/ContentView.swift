@@ -44,7 +44,8 @@ struct ContentView: View {
                         onDebugStepInto: { forth.stepInto() },
                         onDebugStepOut: { forth.stepOut() },
                         onDebugContinue: { forth.resumeDebug() },
-                        onDebugStop: { forth.stopDebug() }
+                        onDebugStop: { forth.stopDebug() },
+                        onCommandClickWord: { word in forth.viewWord(word) }
                     )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .id(tab.id)
@@ -101,7 +102,13 @@ struct ContentView: View {
         }
         .onChange(of: forth.debugLocation) { _, loc in
             guard let loc else { return }
-            workspace.applyDebugLocation(path: loc.path, line: loc.line)
+            workspace.applyDebugLocation(
+                path: loc.path,
+                line: loc.line,
+                name: loc.name,
+                off: loc.off,
+                len: loc.len
+            )
             if forth.isDebugSessionArmed {
                 DispatchQueue.main.async { EditorFocus.request() }
             }
@@ -110,6 +117,15 @@ struct ContentView: View {
             if armed {
                 // Drop console-field focus; DEBUG pauses reject executeCommand anyway.
                 DispatchQueue.main.async { EditorFocus.request() }
+            } else {
+                workspace.clearDebugHighlights()
+            }
+        }
+        .onChange(of: forth.viewMissSeq) { _, _ in
+            let word = forth.viewMissWord
+            guard !word.isEmpty else { return }
+            DispatchQueue.main.async {
+                FindSupport.searchSource(for: word)
             }
         }
     }
@@ -143,11 +159,17 @@ struct ContentView: View {
             Text("No file open")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-            Text("Open a Forth source, or use EDIT / VIEW from 64Forth.")
+            Text("Create a new file, open a Forth source, or use EDIT / VIEW from 64Forth.")
                 .foregroundStyle(.secondary)
-            Button("Open…") { workspace.openPanel() }
-                .keyboardShortcut("o", modifiers: .command)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Button("New File") { workspace.newFile() }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("Open…") { workspace.openPanel() }
+                    .keyboardShortcut("o", modifiers: .command)
+            }
         }
+        .padding(24)
     }
 
     // MARK: - Console
@@ -169,22 +191,17 @@ struct ContentView: View {
                 Text(err)
                     .foregroundStyle(.red)
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(forth.consoleLines.enumerated()), id: \.offset) { index, line in
-                            Text(line)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(index)
-                        }
-                    }
-                }
-                .onChange(of: forth.consoleLines.count) { _, _ in
-                    if let last = forth.consoleLines.indices.last {
-                        proxy.scrollTo(last, anchor: .bottom)
-                    }
-                }
-            }
+            // Faint rule between status/Ping header and the transcript.
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.55))
+                .frame(height: 1)
+                .frame(maxWidth: .infinity)
+            ConsoleTranscriptView(
+                lines: forth.consoleLines,
+                fontSize: 12,
+                onCommandClickWord: { word in forth.viewWord(word) }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack {
                 TextField(
                     forth.isDebugSessionArmed
@@ -275,6 +292,7 @@ private struct TabEditorPane: View {
     var onDebugStepOut: () -> Void
     var onDebugContinue: () -> Void
     var onDebugStop: () -> Void
+    var onCommandClickWord: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -314,6 +332,10 @@ private struct TabEditorPane: View {
                 fontSize: fontSize,
                 wrap: wrapLines,
                 gotoLine: $tab.gotoLine,
+                highlightName: $tab.highlightName,
+                highlightOff: $tab.highlightOff,
+                highlightLen: $tab.highlightLen,
+                highlightEpoch: tab.highlightEpoch,
                 isViewMode: $tab.isViewMode,
                 selection: Binding(
                     get: { tab.selection },
@@ -328,7 +350,8 @@ private struct TabEditorPane: View {
                 onDebugStepInto: onDebugStepInto,
                 onDebugStepOut: onDebugStepOut,
                 onDebugContinue: onDebugContinue,
-                onDebugStop: onDebugStop
+                onDebugStop: onDebugStop,
+                onCommandClickWord: onCommandClickWord
             )
         }
     }
@@ -404,19 +427,23 @@ private struct DebugToolbar: View {
 
 /// Drag handle between editor and console; drag up to grow the console.
 private struct ConsoleSplitter: View {
-    static let height: CGFloat = 6
+    /// Hit target ~3× the old 6pt bar so it is easier to grab.
+    static let height: CGFloat = 18
 
     var onDrag: (CGFloat) -> Void
     var onEnd: () -> Void
 
     var body: some View {
         ZStack {
+            // Soft fill across the whole grab strip.
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.28))
+            // Bold center rule (~3× the old 1pt hairline).
             Rectangle()
                 .fill(Color(nsColor: .separatorColor))
-                .frame(height: 1)
+                .frame(height: 3)
             Rectangle()
                 .fill(Color.clear)
-                .frame(height: Self.height)
                 .contentShape(Rectangle())
                 .onHover { inside in
                     if inside {

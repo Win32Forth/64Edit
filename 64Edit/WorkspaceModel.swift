@@ -19,6 +19,14 @@ final class EditorTab: Identifiable, ObservableObject {
     @Published var isDirty: Bool
     @Published var isViewMode: Bool
     @Published var gotoLine: Int?
+    /// Peek token to highlight after goto (DEBUG); cleared when applied or session ends.
+    @Published var highlightName: String?
+    /// File-relative UTF-8 byte span from dbg-map (nil/0 = name search fallback).
+    @Published var highlightOff: Int?
+    @Published var highlightLen: Int?
+    /// Bumped on each debugLocation so deferred finishGoto retries cannot
+    /// re-apply a stale span after a newer pause (same VIEW line).
+    var highlightEpoch: UInt = 0
     /// Caret / selection restored when this tab becomes selected again.
     var selection = NSRange(location: 0, length: 0)
     /// 1-based first visible line restored with the selection (not @Published — caret churn).
@@ -29,13 +37,19 @@ final class EditorTab: Identifiable, ObservableObject {
         fileURL: URL? = nil,
         isDirty: Bool = false,
         isViewMode: Bool = false,
-        gotoLine: Int? = nil
+        gotoLine: Int? = nil,
+        highlightName: String? = nil,
+        highlightOff: Int? = nil,
+        highlightLen: Int? = nil
     ) {
         self.text = text
         self.fileURL = fileURL
         self.isDirty = isDirty
         self.isViewMode = isViewMode
         self.gotoLine = gotoLine
+        self.highlightName = highlightName
+        self.highlightOff = highlightOff
+        self.highlightLen = highlightLen
     }
 
     var title: String {
@@ -119,11 +133,28 @@ final class WorkspaceModel: ObservableObject {
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.plainText, .text, .utf8PlainText, .forthSource]
         panel.prompt = "Open"
-        guard panel.runModal() == .OK else { return }
+        let accessory = OpenPanelNewFileAccessory(panel: panel)
+        panel.accessoryView = accessory.view
+        panel.isAccessoryViewDisclosed = true
+        let response = panel.runModal()
+        if accessory.choseNewFile {
+            newFile()
+            return
+        }
+        guard response == .OK else { return }
         for url in panel.urls {
             // File menu Open always unlocks editing.
             openURL(url, viewMode: false, line: nil)
         }
+    }
+
+    /// Always create a new Untitled edit tab (⌘N / empty-state / open-panel accessory).
+    @discardableResult
+    func newFile() -> EditorTab {
+        let tab = EditorTab(text: "", fileURL: nil, isDirty: false, isViewMode: false)
+        insertTab(tab)
+        selectedTabID = tab.id
+        return tab
     }
 
     // MARK: - Save
@@ -131,15 +162,26 @@ final class WorkspaceModel: ObservableObject {
     @discardableResult
     func saveSelected() -> Bool {
         guard let tab = selectedTab else { return false }
-        if let url = tab.fileURL {
-            return write(tab, to: url)
-        }
-        return saveSelectedAs()
+        return saveTab(tab)
     }
 
     @discardableResult
     func saveSelectedAs() -> Bool {
         guard let tab = selectedTab else { return false }
+        return saveTabAs(tab)
+    }
+
+    /// Write `tab` to its path, or run Save As when Untitled.
+    @discardableResult
+    func saveTab(_ tab: EditorTab) -> Bool {
+        if let url = tab.fileURL {
+            return write(tab, to: url)
+        }
+        return saveTabAs(tab)
+    }
+
+    @discardableResult
+    func saveTabAs(_ tab: EditorTab) -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText, .utf8PlainText, .forthSource]
         panel.canCreateDirectories = true
@@ -156,12 +198,112 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: - Close / new
 
+    private enum SavePromptResult {
+        case save
+        case discard
+        case cancel
+    }
+
     func closeSelected() {
         guard let id = selectedTabID else { return }
         closeTab(id: id)
     }
 
+    /// Close a tab; if dirty, sheet Save / Don’t Save / Cancel first.
     func closeTab(id: UUID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        if !tab.isDirty {
+            removeTab(id: id)
+            return
+        }
+        selectedTabID = id
+        presentSavePrompt(for: tab) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .save:
+                if self.saveTab(tab) {
+                    self.removeTab(id: id)
+                }
+            case .discard:
+                self.removeTab(id: id)
+            case .cancel:
+                break
+            }
+        }
+    }
+
+    /// Walk dirty tabs with Save / Don’t Save / Cancel sheets; used before quit.
+    /// Calls `completion(true)` only when every dirty tab was saved or discarded.
+    func reviewDirtyTabsForTermination(completion: @escaping (Bool) -> Void) {
+        let dirtyIDs = tabs.filter(\.isDirty).map(\.id)
+        reviewDirtyTabs(ids: dirtyIDs, completion: completion)
+    }
+
+    private func reviewDirtyTabs(ids: [UUID], completion: @escaping (Bool) -> Void) {
+        guard let id = ids.first else {
+            completion(true)
+            return
+        }
+        let rest = Array(ids.dropFirst())
+        guard let tab = tabs.first(where: { $0.id == id }), tab.isDirty else {
+            reviewDirtyTabs(ids: rest, completion: completion)
+            return
+        }
+        selectedTabID = id
+        presentSavePrompt(for: tab) { [weak self] result in
+            guard let self else {
+                completion(false)
+                return
+            }
+            switch result {
+            case .save:
+                if self.saveTab(tab) {
+                    self.reviewDirtyTabs(ids: rest, completion: completion)
+                } else {
+                    completion(false)
+                }
+            case .discard:
+                tab.isDirty = false
+                self.refreshDocumentEdited()
+                self.reviewDirtyTabs(ids: rest, completion: completion)
+            case .cancel:
+                completion(false)
+            }
+        }
+    }
+
+    private func presentSavePrompt(for tab: EditorTab, completion: @escaping (SavePromptResult) -> Void) {
+        let name = tab.fileURL?.lastPathComponent ?? "Untitled"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Do you want to save the changes you made to “\(name)”?"
+        alert.informativeText = "Your changes will be lost if you don’t save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don’t Save")
+        alert.addButton(withTitle: "Cancel")
+
+        if let window = Self.sheetHostWindow() {
+            alert.beginSheetModal(for: window) { response in
+                completion(Self.savePromptResult(from: response))
+            }
+        } else {
+            completion(Self.savePromptResult(from: alert.runModal()))
+        }
+    }
+
+    private static func savePromptResult(from response: NSApplication.ModalResponse) -> SavePromptResult {
+        switch response {
+        case .alertFirstButtonReturn: return .save
+        case .alertSecondButtonReturn: return .discard
+        default: return .cancel
+        }
+    }
+
+    private static func sheetHostWindow() -> NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first { $0.isVisible }
+    }
+
+    private func removeTab(id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabCancellables[id] = nil
         tabs.remove(at: index)
@@ -174,14 +316,14 @@ final class WorkspaceModel: ObservableObject {
             }
         }
         objectWillChange.send()
+        refreshDocumentEdited()
     }
 
-    /// Minimal untitled buffer so the window is never empty after close-all.
+    /// Cold-launch only: one Untitled when nothing was opened via `open -a` / pending-goto.
+    /// Closing the last tab leaves the empty placeholder (New File / Open…).
     func newUntitledIfEmpty() {
         guard tabs.isEmpty else { return }
-        let tab = EditorTab(text: "", fileURL: nil, isDirty: false)
-        insertTab(tab)
-        selectedTabID = tab.id
+        _ = newFile()
     }
 
     // MARK: - Pending goto / debug
@@ -197,18 +339,57 @@ final class WorkspaceModel: ObservableObject {
         _ = PendingGoto.consume()
     }
 
-    func applyDebugLocation(path: String, line: Int) {
+    func applyDebugLocation(
+        path: String,
+        line: Int,
+        name: String = "",
+        off: Int = 0,
+        len: Int = 0
+    ) {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let hl = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hlOpt: String? = hl.isEmpty ? nil : hl
+        let spanOff: Int? = (len > 0 && off >= 0) ? off : nil
+        let spanLen: Int? = (len > 0 && off >= 0) ? len : nil
         if let existing = findTab(matching: trimmed) {
-            focus(existing, viewMode: true, line: line > 0 ? line : nil, reloadIfClean: false, fileURL: nil)
+            // Already focused: update wash only. Re-setting gotoLine every step
+            // re-arms finishGoto's 0/0.05/0.2s retries and lets a stale capture
+            // re-wash an earlier token (e.g. first DUP) after nesting further.
+            let alreadyFocused = selectedTabID == existing.id && existing.gotoLine == nil
+            focus(
+                existing,
+                viewMode: true,
+                line: alreadyFocused ? nil : (line > 0 ? line : nil),
+                reloadIfClean: false,
+                fileURL: nil
+            )
+            existing.highlightEpoch &+= 1
+            existing.highlightName = hlOpt
+            existing.highlightOff = spanOff
+            existing.highlightLen = spanLen
             return
         }
-        _ = openURL(
+        if let tab = openURL(
             URL(fileURLWithPath: trimmed),
             viewMode: true,
             line: line > 0 ? line : nil
-        )
+        ) {
+            tab.highlightEpoch &+= 1
+            tab.highlightName = hlOpt
+            tab.highlightOff = spanOff
+            tab.highlightLen = spanLen
+        }
+    }
+
+    /// Drop temporary DEBUG highlights on every tab (session ended).
+    func clearDebugHighlights() {
+        for tab in tabs {
+            tab.highlightEpoch &+= 1
+            tab.highlightName = nil
+            tab.highlightOff = nil
+            tab.highlightLen = nil
+        }
     }
 
     /// Toggle browse (VIEW) ↔ edit for the selected tab. Browse is read-only.
@@ -271,8 +452,20 @@ final class WorkspaceModel: ObservableObject {
         tabs.append(tab)
         tabCancellables[tab.id] = tab.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+            DispatchQueue.main.async {
+                self?.refreshDocumentEdited()
+            }
         }
         objectWillChange.send()
+        refreshDocumentEdited()
+    }
+
+    /// Red close-button proxy and title dirty mark for the workspace window.
+    func refreshDocumentEdited() {
+        let dirty = tabs.contains(where: \.isDirty)
+        for window in NSApp.windows where window.isVisible || window === NSApp.keyWindow {
+            window.isDocumentEdited = dirty
+        }
     }
 
     private func write(_ tab: EditorTab, to url: URL) -> Bool {
@@ -281,10 +474,11 @@ final class WorkspaceModel: ObservableObject {
             tab.fileURL = url
             tab.isDirty = false
             objectWillChange.send()
+            refreshDocumentEdited()
             return true
         } catch {
-            let alert = NSAlert(error: error)
-            alert.runModal()
+            // App-modal so it stacks cleanly after a Save sheet / Save panel.
+            NSAlert(error: error).runModal()
             return false
         }
     }
@@ -293,5 +487,43 @@ final class WorkspaceModel: ObservableObject {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
+    }
+}
+
+/// Accessory control for `NSOpenPanel`: New File dismisses the panel and creates Untitled.
+private final class OpenPanelNewFileAccessory: NSObject {
+    private(set) var choseNewFile = false
+    private weak var panel: NSOpenPanel?
+    let view: NSView
+
+    init(panel: NSOpenPanel) {
+        self.panel = panel
+        let button = NSButton(
+            title: "New File",
+            target: nil,
+            action: nil
+        )
+        button.bezelStyle = .rounded
+        button.setButtonType(.momentaryPushIn)
+        button.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        button.sizeToFit()
+        var frame = button.frame
+        frame.size.width = max(frame.width, 88)
+        frame.origin = NSPoint(x: 8, y: 4)
+        button.frame = frame
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: frame.maxX + 8, height: frame.height + 8))
+        container.addSubview(button)
+        self.view = container
+        super.init()
+        button.target = self
+        button.action = #selector(newFileClicked(_:))
+    }
+
+    @objc private func newFileClicked(_ sender: Any?) {
+        choseNewFile = true
+        // End the modal open session; caller checks `choseNewFile`.
+        NSApp.stopModal(withCode: .cancel)
+        panel?.close()
     }
 }

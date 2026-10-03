@@ -19,6 +19,15 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         var path: String
         /// 1-based line from the word's VIEW stamp.
         var line: Int
+        /// Peek token name for editor highlight (empty when unknown).
+        var name: String
+        /// File-relative UTF-8 byte offset from dbg-map (0 = use name search).
+        var off: Int
+        /// Span length in bytes (0 = use name search).
+        var len: Int
+        /// Monotonic per sock message so SwiftUI onChange fires even when
+        /// path/line/name/off/len repeat (e.g. consecutive 0/0 name fallbacks).
+        var seq: UInt
     }
 
     @Published private(set) var isConnected = false
@@ -28,11 +37,17 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     @Published private(set) var isDebugSessionArmed = false
     /// Latest paused-word VIEW location from 64Forth (nil when not debugging).
     @Published private(set) var debugLocation: DebugLocation?
+    /// Bumps when VIEW miss should fall back to in-editor find (`viewMissWord`).
+    @Published private(set) var viewMissSeq: UInt = 0
+    /// Token from the last `viewResult(opened: false)` (empty when none).
+    @Published private(set) var viewMissWord: String = ""
 
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "com.Win32Forth.SixtyFourForth.edit-client")
     private var incoming = Data()
+    private var debugLocationSeq: UInt = 0
+    private var viewMissSeqCounter: UInt = 0
 
     func start() {
         guard fd < 0 else { return }
@@ -100,6 +115,36 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     func stepOut() { send(.stepOut) }
     func resumeDebug() { send(.resume) }
     func stopDebug() { send(.stop) }
+
+    /// ⌘-click goto-source: `viewWord` over edit.sock → `viewResult`.
+    /// On miss (`opened: false`) or when disconnected, bumps `viewMissSeq` so the
+    /// UI searches the editor. Refuses while DEBUG is paused (host rejects evaluate).
+    func viewWord(_ word: String) {
+        let name = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        else { return }
+        if isDebugSessionArmed {
+            lastError = "debugger paused — use Step/Continue"
+            appendConsole("VIEW \(name): debugger paused\n")
+            return
+        }
+        if fd < 0 {
+            start()
+        }
+        guard fd >= 0 else {
+            lastError = lastError ?? "64Forth is not listening — start 64Forth first"
+            // Local note needs a CR so later console lines do not smash onto it.
+            appendConsole("Hyper: not connected\n")
+            // No Forth dictionary — fall back to in-file find for the clicked token.
+            viewMissWord = name
+            viewMissSeqCounter &+= 1
+            viewMissSeq = viewMissSeqCounter
+            return
+        }
+        lastError = nil
+        send(.viewWord(name: name))
+    }
 
     /// Reconnect check only — does not evaluate Forth (safe while DEBUG is paused).
     func ping() {
@@ -208,14 +253,33 @@ final class ForthConnectionManager: NSObject, ObservableObject {
                     lastError = nil
                 }
             }
-        case .debugLocation(let path, let line):
+        case .debugLocation(let path, let line, let name, let off, let len):
             // A pause location implies the stepper is live; arm immediately so
             // letter keys do not race the debugSession poll / paint notify.
             isDebugSessionArmed = true
             if lastError == "debugger not armed" {
                 lastError = nil
             }
-            debugLocation = DebugLocation(path: path, line: line)
+            debugLocationSeq &+= 1
+            debugLocation = DebugLocation(
+                path: path,
+                line: line,
+                name: name,
+                off: off,
+                len: len,
+                seq: debugLocationSeq
+            )
+        case .viewResult(let word, let opened):
+            if opened {
+                lastError = nil
+            } else {
+                // Expected miss (undefined or no VIEW stamp) — search the editor.
+                lastError = nil
+                appendConsole("VIEW \(word): no source — searching editor\n")
+                viewMissWord = word
+                viewMissSeqCounter &+= 1
+                viewMissSeq = viewMissSeqCounter
+            }
         }
     }
 

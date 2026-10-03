@@ -41,26 +41,31 @@ plus a wake-up DistributedNotification `com.Win32Forth.64Edit.goto`, and `open -
 | `EDIT` path  | `mode: "edit"`, optional no line | Opens editable |
 | `VIEW` / `EDIT-AT` / DEBUG pause | `mode: "view"`, `line` | Scrolls to the line; **View mode** (read-only) |
 
-**View mode:** yellow banner, `NSTextView` not editable. Typing (or cut/paste/undo) asks **Switch to Edit mode?** Yes/No. Banner **Edit** or ⌘⇧E also unlocks editing. Each tab keeps its own view mode so debug-opened files stay browse until you unlock them. Path matching uses standardized paths, then same-inode / `fileResourceIdentifier`.
+**View mode:** yellow banner, `NSTextView` not editable. Typing, cut, paste, and undo are ignored (no dialog). Banner **Edit**, ⌘⇧E, or **View → Allow Editing** unlocks editing. Each tab keeps its own view mode so debug-opened files stay browse until you unlock them. Path matching uses standardized paths, then same-inode / `fileResourceIdentifier`.
 
 ## Workspace
 
 Single `Window("64Edit")` with tabs (not DocumentGroup):
 
+- **New File** (`⌘N`): Untitled edit tab from File → New File, the empty-state screen, or the Open panel accessory. Closing the last tab leaves the empty placeholder (no auto-Untitled); cold launch still creates one Untitled when nothing was opened.
 - Open / Save / Save As / Close Tab; dirty mark `•` in the tab title
-- Shared Forth console over `edit.sock` (resizable splitter; `consolePaneHeight`)
+- **Dirty close / quit:** Save / Don’t Save / Cancel sheets per modified tab (Untitled uses Save As); window shows the document-edited proxy; last window close quits
+- Shared Forth console over `edit.sock` (thicker splitter; `consolePaneHeight`)
 - Pending-goto and `debugLocation` find-or-open by path/inode; nested DEBUG steps open multiple files and restore the prior tab when stepping out
 - Per-tab caret and top visible line on tab switch
+- **Line numbers** (source editor only): SZ / FILE-ECHO style 5-column right-justified gutter
+- **Find:** Edit → Find… / Find Next / Find Previous (`⌘F` / `⌘G` / `⌘⇧G`) on the TextEdit-style find bar
+- **⌘-click VIEW:** sends sock `viewWord`; on miss or when Forth is disconnected, searches the open file and opens the find bar (`Hyper: not connected` note ends with a CR)
+- Home / End → start/end of line; ⌘-Home / ⌘-End → start/end of file (Shift extends selection)
 - **Debug toolbar** while 64Forth ITC DEBUG/TDBG is armed: Step Over / Into / Out / Continue / Stop
-  - While armed the Forth command field is **disabled** (execute is busy at pause) and focus moves to the editor so keys are not trapped in the console
+  - While armed the Forth command field is **disabled** and focus moves to the editor
   - Shortcuts: **F6** over, **F7** into, **F8** out, **F5** / **⌘⇧Y** continue, **Esc** stop
-  - In browse (view) mode, Forth letter keys also work (`Space`/`o` over, `i` into, `g` continue, `q` stop)
-  - Editor owns those keys when the NSTextView is first responder; `DebugKeyMonitor` handles them only when focus is elsewhere (both must not handle the same key)
-  - After Continue/`g`, status shows Engine connected alone (late “debugger not armed” sock errors are ignored for the red banner)
-- **View → Browse Mode** (⌘⇧B) toggles the selected tab between browse (read-only) and Allow Editing (merged into the system View menu)
+  - In browse mode, Forth letter keys also work (`Space`/`o` over, `i` into, `g` continue, `q` stop)
+- **View → Browse Mode** (⌘⇧B) toggles browse ↔ Allow Editing (system View menu)
 - Ping reconnects the socket only (never evaluates Forth / WORDS)
+- **DEBUG word highlight:** prefers dbg-map `off`/`len` from sock `debugLocation`; else whole-word name search near the VIEW line with runtime→source aliases. Pastel green wash; clears on next pause or session end.
 
-Still ahead: highlight the current debug word, dirty-close prompts, polished New/untitled, splits, session restore, breakpoints, deeper XPC.
+Still ahead: splits, session restore, breakpoints, deeper XPC.
 
 ## Build
 
@@ -80,14 +85,17 @@ before `xcodebuild` (or use full Xcode). For a DMG, build **Release** and place 
 64Edit/
   64Edit.xcodeproj/
   64Edit/
-    SixtyFourEditApp.swift   App entry (single Window workspace)
-    AppDelegate.swift        open -a / Finder file opens → tabs
-    WorkspaceModel.swift     Tab list, open/save, pending-goto find-or-open
-    SixtyFourDocument.swift  UTType / FileDocument helpers
-    ContentView.swift        Tabs + editor + shared console + DebugToolbar
-    EditorTextView.swift     NSTextView; goto scroll; view-mode guard; DEBUG keys
-    DebugKeyMonitor.swift    Window-level F5–F8 / letters when editor not focused
-    PendingGoto.swift        pending-goto.json consume + scroll
+    SixtyFourEditApp.swift      App entry (single Window workspace)
+    AppDelegate.swift           open -a / Finder opens; dirty quit sheets
+    WorkspaceModel.swift        Tabs, New File, dirty Save sheets, pending-goto
+    SixtyFourDocument.swift     UTType / FileDocument helpers
+    ContentView.swift           Tabs + editor + shared console + DebugToolbar
+    EditorTextView.swift        NSTextView; goto; view-mode; DEBUG keys; Home/End
+    LineNumberRulerView.swift   5-column right-justified source gutter
+    ConsoleTranscriptView.swift Console NSTextView + ⌘-click VIEW
+    FindSupport.swift           TextEdit find bar + VIEW-miss search
+    DebugKeyMonitor.swift       Window-level F5–F8 / letters when editor not focused
+    PendingGoto.swift           pending-goto.json consume + scroll + highlight
     FileMenuFixup.swift
     ForthConnectionManager.swift
     IPCProtocol.swift
@@ -97,4 +105,4 @@ before `xcodebuild` (or use full Xcode). For a DMG, build **Release** and place 
 
 ## Status
 
-Usable companion for 64Forth **1.5.3** (version lockstep): tabs, view mode, DEBUG multi-file follow, sock steppers, Browse Mode, quiet opens when sock live. Leave `xcuserdata` unstaged when committing.
+Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode. Leave `xcuserdata` unstaged when committing. No release in this push — DMG comes later.

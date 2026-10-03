@@ -14,7 +14,14 @@ struct EditorTextView: NSViewRepresentable {
     var wrap: Bool
     /// 1-based line to reveal once; ContentView clears after apply.
     @Binding var gotoLine: Int?
-    /// VIEW opens read-only; typing prompts to switch into edit mode.
+    /// DEBUG peek token to highlight near `gotoLine` (pastel green); cleared after apply.
+    @Binding var highlightName: String?
+    /// File-relative UTF-8 byte span from dbg-map; preferred over name when set.
+    @Binding var highlightOff: Int?
+    @Binding var highlightLen: Int?
+    /// Matches `EditorTab.highlightEpoch`; stale deferred applies must not paint.
+    var highlightEpoch: UInt = 0
+    /// VIEW / browse: read-only; edit keys are ignored (use banner Edit / ⌘⇧E / Browse Mode).
     @Binding var isViewMode: Bool
     /// Per-tab caret / selection (saved while editing, restored on tab switch).
     @Binding var selection: NSRange
@@ -27,6 +34,13 @@ struct EditorTextView: NSViewRepresentable {
     var onDebugStepOut: (() -> Void)?
     var onDebugContinue: (() -> Void)?
     var onDebugStop: (() -> Void)?
+    /// ⌘-click on a Forth token → Hyper VIEW via IPC (`VIEW <word>`).
+    var onCommandClickWord: ((String) -> Void)?
+
+    /// Same wash as the Debug toolbar when connected (`Color.green.opacity(0.18)`).
+    static var debugHighlightColor: NSColor {
+        NSColor.systemGreen.withAlphaComponent(0.18)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -36,12 +50,14 @@ struct EditorTextView: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        scroll.findBarPosition = .aboveContent
 
-        let tv = NSTextView()
+        let tv = EditorNSTextView()
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
         tv.usesFindBar = true
+        tv.isIncrementalSearchingEnabled = true
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
@@ -62,7 +78,13 @@ struct EditorTextView: NSViewRepresentable {
         tv.autoresizingMask = wrap ? [.width] : []
 
         scroll.documentView = tv
+        let ruler = LineNumberRulerView(textView: tv)
+        scroll.verticalRulerView = ruler
+        scroll.hasVerticalRuler = true
+        scroll.rulersVisible = true
+        context.coordinator.lineNumberRuler = ruler
         context.coordinator.textView = tv
+        context.coordinator.installCommandClick(on: tv)
         context.coordinator.installKeyMonitor()
         context.coordinator.installScrollObserver(on: scroll)
         context.coordinator.needsRestore = true
@@ -72,6 +94,9 @@ struct EditorTextView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let tv = scroll.documentView as? NSTextView else { return }
+        if let editor = tv as? EditorNSTextView {
+            context.coordinator.installCommandClick(on: editor)
+        }
 
         let textChanged = tv.string != text
         if textChanged {
@@ -80,9 +105,11 @@ struct EditorTextView: NSViewRepresentable {
             tv.string = text
             context.coordinator.suppressSave = false
             context.coordinator.needsRestore = true
+            context.coordinator.lineNumberRuler?.invalidate()
         }
         tv.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         tv.isEditable = !isViewMode
+        context.coordinator.lineNumberRuler?.syncFont(from: tv)
 
         tv.isHorizontallyResizable = !wrap
         tv.autoresizingMask = wrap ? [.width] : []
@@ -99,17 +126,68 @@ struct EditorTextView: NSViewRepresentable {
             )
         }
 
+        // Session ended: drop the wash. Do **not** clear when highlightName is
+        // merely consumed (finishGoto/finishHighlightOnly nil it after apply) —
+        // that used to wipe the temporary attribute on the next update pass.
+        if !isDebugArmed {
+            context.coordinator.clearDebugHighlight()
+        }
+
         if let line = gotoLine, line > 0 {
             context.coordinator.needsRestore = false
             let attempt = line
+            let name = highlightName
+            let off = highlightOff
+            let len = highlightLen
+            let epoch = highlightEpoch
             DispatchQueue.main.async {
-                self.finishGoto(scroll: scroll, coordinator: context.coordinator, line: attempt)
+                self.finishGoto(
+                    scroll: scroll,
+                    coordinator: context.coordinator,
+                    line: attempt,
+                    highlightName: name,
+                    highlightOff: off,
+                    highlightLen: len,
+                    epoch: epoch
+                )
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                self.finishGoto(scroll: scroll, coordinator: context.coordinator, line: attempt)
+                self.finishGoto(
+                    scroll: scroll,
+                    coordinator: context.coordinator,
+                    line: attempt,
+                    highlightName: name,
+                    highlightOff: off,
+                    highlightLen: len,
+                    epoch: epoch
+                )
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                self.finishGoto(scroll: scroll, coordinator: context.coordinator, line: attempt)
+                self.finishGoto(
+                    scroll: scroll,
+                    coordinator: context.coordinator,
+                    line: attempt,
+                    highlightName: name,
+                    highlightOff: off,
+                    highlightLen: len,
+                    epoch: epoch
+                )
+            }
+        } else if isDebugArmed, hasPendingHighlight {
+            // Location already scrolled; only the token / span changed (same-line step).
+            let name = highlightName
+            let off = highlightOff
+            let len = highlightLen
+            let epoch = highlightEpoch
+            DispatchQueue.main.async {
+                self.finishHighlightOnly(
+                    scroll: scroll,
+                    coordinator: context.coordinator,
+                    name: name,
+                    off: off,
+                    len: len,
+                    epoch: epoch
+                )
             }
         } else if context.coordinator.needsRestore {
             let attemptSelection = selection
@@ -131,15 +209,74 @@ struct EditorTextView: NSViewRepresentable {
         }
     }
 
-    private func finishGoto(scroll: NSScrollView, coordinator: Coordinator, line: Int) {
+    private var hasPendingHighlight: Bool {
+        if let len = highlightLen, len > 0, let off = highlightOff, off >= 0 { return true }
+        if let name = highlightName, !name.isEmpty { return true }
+        return false
+    }
+
+    private func finishGoto(
+        scroll: NSScrollView,
+        coordinator: Coordinator,
+        line: Int,
+        highlightName: String?,
+        highlightOff: Int?,
+        highlightLen: Int?,
+        epoch: UInt
+    ) {
         guard coordinator.parent.gotoLine == nil || coordinator.parent.gotoLine == line else { return }
         guard let tv = scroll.documentView as? NSTextView else { return }
         coordinator.suppressSave = true
         if PendingGoto.scroll(tv, toLine: line) {
-            coordinator.parent.gotoLine = nil
+            // Only the attempt that consumes gotoLine may paint. Later layout
+            // retries only keep the line visible; a stale capture from an
+            // earlier pause must not overwrite a newer span (same VIEW line).
+            let consuming = coordinator.parent.gotoLine == line
+            if consuming {
+                coordinator.parent.gotoLine = nil
+            }
+            let epochCurrent = coordinator.parent.highlightEpoch == epoch
+            let pendingName = highlightName.map { !$0.isEmpty } ?? false
+            let pendingSpan = (highlightLen ?? 0) > 0 && (highlightOff ?? -1) >= 0
+            if consuming, epochCurrent, (pendingName || pendingSpan) {
+                coordinator.applyDebugHighlight(
+                    in: tv,
+                    name: highlightName,
+                    nearLine: line,
+                    off: highlightOff,
+                    len: highlightLen
+                )
+                coordinator.parent.highlightName = nil
+                coordinator.parent.highlightOff = nil
+                coordinator.parent.highlightLen = nil
+            }
             coordinator.captureViewState(from: tv)
             coordinator.needsRestore = false
         }
+        coordinator.suppressSave = false
+    }
+
+    private func finishHighlightOnly(
+        scroll: NSScrollView,
+        coordinator: Coordinator,
+        name: String?,
+        off: Int?,
+        len: Int?,
+        epoch: UInt
+    ) {
+        guard coordinator.parent.highlightEpoch == epoch else { return }
+        let stillName = name == nil || coordinator.parent.highlightName == name
+        let stillOff = off == nil || coordinator.parent.highlightOff == off
+        let stillLen = len == nil || coordinator.parent.highlightLen == len
+        guard stillName, stillOff, stillLen else { return }
+        guard let tv = scroll.documentView as? NSTextView else { return }
+        coordinator.suppressSave = true
+        let line = PendingGoto.lineNumber(atCaretIn: tv) ?? 1
+        coordinator.applyDebugHighlight(in: tv, name: name, nearLine: line, off: off, len: len)
+        coordinator.parent.highlightName = nil
+        coordinator.parent.highlightOff = nil
+        coordinator.parent.highlightLen = nil
+        coordinator.captureViewState(from: tv)
         coordinator.suppressSave = false
     }
 
@@ -149,13 +286,85 @@ struct EditorTextView: NSViewRepresentable {
         private var keyMonitor: Any?
         private var scrollObserver: NSObjectProtocol?
         private var focusObserver: NSObjectProtocol?
-        private var isPrompting = false
         /// Skip writing bindings while we programmatically move caret/scroll.
         var suppressSave = false
         /// Apply saved selection / top line once the view is ready.
         var needsRestore = false
+        /// Character range of the last pastel-green DEBUG token highlight.
+        private var debugHighlightRange: NSRange?
+        /// SZ-style 5-column line-number gutter (source editor only).
+        weak var lineNumberRuler: LineNumberRulerView?
 
         init(_ parent: EditorTextView) { self.parent = parent }
+
+        func clearDebugHighlight() {
+            guard let tv = textView, let layout = tv.layoutManager else {
+                debugHighlightRange = nil
+                return
+            }
+            let charCount = (tv.string as NSString).length
+            if let prev = debugHighlightRange, NSMaxRange(prev) <= charCount {
+                layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: prev)
+            }
+            debugHighlightRange = nil
+        }
+
+        /// Prefer dbg-map file-relative `off`/`len` when present; else whole-word
+        /// search near `nearLine` (1-based). Pastel green wash, not system selection.
+        /// If no token match (e.g. LIT without maps), collapse the scroll line selection
+        /// so the whole line does not stay gray.
+        func applyDebugHighlight(
+            in tv: NSTextView,
+            name: String?,
+            nearLine: Int,
+            off: Int? = nil,
+            len: Int? = nil
+        ) {
+            clearDebugHighlight()
+            let ns = tv.string as NSString
+            let charCount = ns.length
+            var range: NSRange?
+            if let off, let len, len > 0, off >= 0 {
+                // dbg-map offsets are UTF-8 byte offsets into the file bytes.
+                if let utf8Range = Self.nsRange(fromUTF8Offset: off, length: len, in: tv.string),
+                   NSMaxRange(utf8Range) <= charCount {
+                    range = utf8Range
+                }
+            }
+            if range == nil, let name, !name.isEmpty {
+                range = PendingGoto.findWholeWord(name, in: tv.string, nearLine: nearLine)
+            }
+            guard let range else {
+                let loc = PendingGoto.startIndex(ofLine: max(nearLine, 1), in: ns)
+                let caret = min(loc, max(0, charCount))
+                tv.setSelectedRange(NSRange(location: caret, length: 0))
+                return
+            }
+            guard let layout = tv.layoutManager else { return }
+            layout.addTemporaryAttribute(
+                .backgroundColor,
+                value: EditorTextView.debugHighlightColor,
+                forCharacterRange: range
+            )
+            layout.invalidateDisplay(forCharacterRange: range)
+            debugHighlightRange = range
+            tv.scrollRangeToVisible(range)
+            // Keep a collapsed caret at the token so browse-mode keys still work;
+            // do not leave a system selection (that would hide the green wash).
+            tv.setSelectedRange(NSRange(location: range.location, length: 0))
+        }
+
+        /// Map a UTF-8 byte offset/length into an NSString UTF-16 NSRange.
+        private static func nsRange(fromUTF8Offset off: Int, length len: Int, in text: String) -> NSRange? {
+            guard off >= 0, len > 0 else { return nil }
+            let utf8 = text.utf8
+            guard off + len <= utf8.count else { return nil }
+            let startIdx = utf8.index(utf8.startIndex, offsetBy: off)
+            let endIdx = utf8.index(startIdx, offsetBy: len)
+            guard let from = String.Index(startIdx, within: text),
+                  let to = String.Index(endIdx, within: text) else { return nil }
+            return NSRange(from..<to, in: text)
+        }
 
         deinit {
             if let keyMonitor {
@@ -166,6 +375,12 @@ struct EditorTextView: NSViewRepresentable {
             }
             if let focusObserver {
                 NotificationCenter.default.removeObserver(focusObserver)
+            }
+        }
+
+        func installCommandClick(on tv: EditorNSTextView) {
+            tv.onCommandClickWord = { [weak self] word in
+                self?.parent.onCommandClickWord?(word)
             }
         }
 
@@ -202,7 +417,9 @@ struct EditorTextView: NSViewRepresentable {
                 object: scroll.contentView,
                 queue: .main
             ) { [weak self] _ in
-                guard let self, let tv = self.textView, !self.suppressSave else { return }
+                guard let self, let tv = self.textView else { return }
+                self.lineNumberRuler?.invalidate()
+                guard !self.suppressSave else { return }
                 self.captureViewState(from: tv)
             }
         }
@@ -351,12 +568,11 @@ struct EditorTextView: NSViewRepresentable {
                 return event
             }
 
-            // Allow navigation / copy / find; block edits.
+            // Allow navigation / copy / find; swallow edits (no Switch to Edit dialog).
             if event.modifierFlags.contains(.command) {
                 let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
                 if ["c", "a", "f", "g"].contains(chars) { return event }
                 if chars == "x" || chars == "v" || chars == "z" {
-                    promptSwitchToEdit()
                     return nil
                 }
                 return event
@@ -367,25 +583,16 @@ struct EditorTextView: NSViewRepresentable {
             switch event.keyCode {
             case 123, 124, 125, 126, // arrows
                  115, 119, 116, 121, // home/end/page
-                 48,  // tab (leave for focus; treat as edit attempt)
                  53:  // escape
-                if event.keyCode == 48 {
-                    promptSwitchToEdit()
-                    return nil
-                }
                 return event
-            case 51, 117: // delete / forward delete
-                promptSwitchToEdit()
+            case 48, 51, 117: // tab / delete / forward delete
                 return nil
             default:
                 break
             }
-            if let chars = event.characters, chars.contains(where: { !$0.isNewline && !$0.isWhitespace || $0.isNewline || $0.isWhitespace }) {
-                // Any character / return / space is an edit attempt in view mode.
-                if !chars.isEmpty {
-                    promptSwitchToEdit()
-                    return nil
-                }
+            // Any character / return / space is an edit attempt in view mode.
+            if let chars = event.characters, !chars.isEmpty {
+                return nil
             }
             return event
         }
@@ -452,7 +659,7 @@ struct EditorTextView: NSViewRepresentable {
                 parent.onDebugStop?()
                 return true
             case "h":
-                // Console prints help; here just avoid the edit-mode prompt.
+                // Console prints help; swallow so browse mode stays quiet.
                 return true
             default:
                 return false
@@ -460,40 +667,102 @@ struct EditorTextView: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
-            guard parent.isViewMode else { return true }
-            promptSwitchToEdit()
-            return false
+            // Browse / VIEW: refuse edits silently (banner Edit / ⌘⇧E / Browse Mode unlock).
+            !parent.isViewMode
         }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             parent.text = tv.string
+            lineNumberRuler?.invalidate()
             if !suppressSave {
                 captureViewState(from: tv)
             }
         }
+    }
+}
 
-        private func promptSwitchToEdit() {
-            guard !isPrompting else { return }
-            isPrompting = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                defer { self.isPrompting = false }
-                guard self.parent.isViewMode else { return }
-                let alert = NSAlert()
-                alert.messageText = "Switch to Edit mode?"
-                alert.informativeText = "This file was opened with VIEW and is read-only."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "Yes")
-                alert.addButton(withTitle: "No")
-                // Esc dismisses like No (stay in view mode).
-                alert.buttons.last?.keyEquivalent = "\u{1b}"
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
-                    self.parent.isViewMode = false
-                    self.textView?.isEditable = true
-                }
+/// NSTextView that turns ⌘-click into a Forth-token VIEW callback.
+final class EditorNSTextView: NSTextView {
+    var onCommandClickWord: ((String) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains(.command) {
+            let pt = convert(event.locationInWindow, from: nil)
+            let idx = characterIndexForInsertion(at: pt)
+            let ns = string as NSString
+            if let word = Self.forthToken(at: idx, in: ns),
+               word.rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
+                let caret = min(max(0, idx), ns.length)
+                setSelectedRange(NSRange(location: caret, length: 0))
+                window?.makeFirstResponder(self)
+                onCommandClickWord?(word)
+                return
             }
         }
+        super.mouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if handleHomeEndKeys(event) { return }
+        super.keyDown(with: event)
+    }
+
+    /// Whitespace-delimited Forth token at UTF-16 index (same rules as 64Forth console).
+    static func forthToken(at idx: Int, in ns: NSString) -> String? {
+        guard ns.length > 0 else { return nil }
+        var i = min(max(0, idx), ns.length)
+        func isSep(_ c: unichar) -> Bool {
+            c == 32 || c == 9 || c == 10 || c == 13
+        }
+        if i > 0 && i < ns.length && isSep(ns.character(at: i)) {
+            i -= 1
+        }
+        if i >= ns.length { i = ns.length - 1 }
+        if isSep(ns.character(at: i)) { return nil }
+        var lo = i
+        var hi = i + 1
+        while lo > 0 && !isSep(ns.character(at: lo - 1)) { lo -= 1 }
+        while hi < ns.length && !isSep(ns.character(at: hi)) { hi += 1 }
+        let token = ns.substring(with: NSRange(location: lo, length: hi - lo))
+        return token.isEmpty ? nil : token
+    }
+}
+
+extension NSTextView {
+    /// Home/End → current line; ⌘-Home / ⌘-End → start/end of file.
+    /// Shift extends the selection. Returns true when the event was handled.
+    @discardableResult
+    func handleHomeEndKeys(_ event: NSEvent) -> Bool {
+        let key = event.keyCode
+        guard key == 115 || key == 119 else { return false }
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Leave Option/Control chords to the system.
+        if mods.contains(.option) || mods.contains(.control) { return false }
+        let shift = mods.contains(.shift)
+        let command = mods.contains(.command)
+
+        switch (key, command, shift) {
+        case (115, false, false):
+            moveToBeginningOfLine(nil)
+        case (115, false, true):
+            moveToBeginningOfLineAndModifySelection(nil)
+        case (115, true, false):
+            moveToBeginningOfDocument(nil)
+        case (115, true, true):
+            moveToBeginningOfDocumentAndModifySelection(nil)
+        case (119, false, false):
+            moveToEndOfLine(nil)
+        case (119, false, true):
+            moveToEndOfLineAndModifySelection(nil)
+        case (119, true, false):
+            moveToEndOfDocument(nil)
+        case (119, true, true):
+            moveToEndOfDocumentAndModifySelection(nil)
+        default:
+            return false
+        }
+        return true
     }
 }

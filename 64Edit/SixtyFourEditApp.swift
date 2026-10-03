@@ -38,6 +38,11 @@ struct SixtyFourEditApp: App {
         .defaultSize(width: 960, height: 700)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New File") {
+                    workspace.newFile()
+                }
+                .keyboardShortcut("n", modifiers: .command)
+
                 Button("Open…") {
                     workspace.openPanel()
                 }
@@ -55,10 +60,31 @@ struct SixtyFourEditApp: App {
                 .keyboardShortcut("s", modifiers: [.command, .shift])
 
                 Button("Close Tab") {
+                    // Last tab → empty placeholder (New File / Open…), not auto-Untitled.
                     workspace.closeSelected()
-                    workspace.newUntitledIfEmpty()
                 }
                 .keyboardShortcut("w", modifiers: .command)
+            }
+            // TextEdit-style find bar on the focused editor / console NSTextView.
+            // (SwiftUI Edit→Find alone often misses embedded AppKit text views.)
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Find…") {
+                    FindSupport.perform(.showFindInterface)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("Find Next") {
+                    FindSupport.perform(.nextMatch)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+                Button("Find Previous") {
+                    FindSupport.perform(.previousMatch)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                Button("Use Selection for Find") {
+                    FindSupport.perform(.setSearchString)
+                }
+                // No ⌘E — that stays free for future VIEW-under-caret; use the menu.
             }
             // Merge into the system View menu (CommandMenu("View") creates a second one).
             CommandGroup(after: .toolbar) {

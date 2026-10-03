@@ -20,14 +20,15 @@ enum EditorFocus {
         NotificationCenter.default.post(name: .sixtyFourEditFocusEditor, object: nil)
     }
 
-    /// True when the key window's first responder is an editor NSTextView (or descendant).
+    /// True when the key window's first responder is the source editor
+    /// (`EditorNSTextView`), not the console transcript.
     static func editorIsKeyFirstResponder() -> Bool {
         guard let window = NSApp.keyWindow,
               let fr = window.firstResponder as? NSView
         else { return false }
         var view: NSView? = fr
         while let v = view {
-            if v is NSTextView { return true }
+            if v is EditorNSTextView { return true }
             view = v.superview
         }
         return false
@@ -60,7 +61,7 @@ final class DebugKeyMonitor {
 
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard let forth, forth.isDebugSessionArmed else { return event }
-        // Leave modal alerts alone (e.g. Switch to Edit?).
+        // Leave modal alerts alone if any are up.
         if NSApp.modalWindow != nil { return event }
 
         // EditorTextView also installs a local key monitor. All local monitors
