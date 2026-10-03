@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct SixtyFourEditApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var workspace = WorkspaceModel()
     @StateObject private var forth = ForthConnectionManager()
 
     init() {
@@ -22,20 +24,41 @@ struct SixtyFourEditApp: App {
     }
 
     var body: some Scene {
-        DocumentGroup(newDocument: ForthDocument()) { file in
-            ContentView(document: file.$document, fileURL: file.fileURL)
+        // Single workspace window (not DocumentGroup / multi-window).
+        Window("64Edit", id: "workspace") {
+            ContentView()
+                .environmentObject(workspace)
                 .environmentObject(forth)
-                .onAppear { forth.start() }
-        }
-        .commands {
-            CommandGroup(after: .saveItem) {
-                Button("Save As…") {
-                    NSApp.sendAction(
-                        #selector(NSDocument.saveAs(_:)),
-                        to: nil,
-                        from: nil
-                    )
+                .frame(minWidth: 640, minHeight: 420)
+                .onAppear {
+                    appDelegate.attach(workspace: workspace)
+                    forth.start()
                 }
+        }
+        .defaultSize(width: 960, height: 700)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("Open…") {
+                    workspace.openPanel()
+                }
+                .keyboardShortcut("o", modifiers: .command)
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") {
+                    _ = workspace.saveSelected()
+                }
+                .keyboardShortcut("s", modifiers: .command)
+
+                Button("Save As…") {
+                    _ = workspace.saveSelectedAs()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+
+                Button("Close Tab") {
+                    workspace.closeSelected()
+                    workspace.newUntitledIfEmpty()
+                }
+                .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(after: .textFormatting) {
             }

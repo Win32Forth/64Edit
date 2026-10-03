@@ -97,6 +97,7 @@ final class ForthConnectionManager: NSObject, ObservableObject {
 
     func stepOver() { send(.stepOver) }
     func stepInto() { send(.stepInto) }
+    func stepOut() { send(.stepOut) }
     func resumeDebug() { send(.resume) }
     func stopDebug() { send(.stop) }
 
@@ -204,14 +205,25 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         }
     }
 
-    private func appendConsole(_ line: String) {
-        let pieces = line.split(whereSeparator: \.isNewline)
-        if pieces.isEmpty {
-            if !line.isEmpty { consoleLines.append(line) }
-            return
+    /// Stream console text like 64Forth's ConsoleView: mid-line chunks stay on the
+    /// current line, and BS (0x08) erases the DEBUG block cursor (U+2588).
+    private func appendConsole(_ text: String) {
+        guard !text.isEmpty else { return }
+        var lines = consoleLines
+        if lines.isEmpty {
+            lines.append("")
         }
-        for p in pieces {
-            consoleLines.append(String(p))
+        for ch in text {
+            if ch == "\u{8}" {
+                if !lines[lines.count - 1].isEmpty {
+                    lines[lines.count - 1].removeLast()
+                }
+            } else if ch == "\n" || ch == "\r" {
+                lines.append("")
+            } else {
+                lines[lines.count - 1].append(ch)
+            }
         }
+        consoleLines = lines
     }
 }

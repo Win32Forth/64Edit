@@ -8,19 +8,15 @@
 import SwiftUI
 import AppKit
 
+/// Single-window workspace: tab bar + editor + shared Forth console.
 struct ContentView: View {
-    @Binding var document: ForthDocument
-    var fileURL: URL?
+    @EnvironmentObject private var workspace: WorkspaceModel
+    @EnvironmentObject private var forth: ForthConnectionManager
     @AppStorage("editorFontSize") private var fontSize = 13.0
     @AppStorage("editorWrap") private var wrapLines = false
-    /// Height of the Forth console pane; drag the splitter to change it.
     @AppStorage("consolePaneHeight") private var consoleHeight = 160.0
-    @EnvironmentObject private var forth: ForthConnectionManager
     @State private var commandLine = ""
-    @State private var gotoLine: Int?
-    @State private var isViewMode = false
     @State private var gotoObserver: NSObjectProtocol?
-    @State private var gotoApplied = false
     @State private var dragStartHeight: CGFloat?
 
     private static let consoleMinHeight: CGFloat = 88
@@ -35,33 +31,16 @@ struct ContentView: View {
             let clampedConsole = min(max(consoleHeight, Self.consoleMinHeight), maxConsole)
 
             VStack(spacing: 0) {
-                if isViewMode {
-                    HStack(spacing: 8) {
-                        Text("View mode")
-                            .fontWeight(.semibold)
-                        Text("Read-only — typing asks to switch to Edit")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Edit") {
-                            isViewMode = false
-                        }
-                        .keyboardShortcut("e", modifiers: [.command, .shift])
-                    }
-                    .font(.system(size: 11))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.yellow.opacity(0.22))
-                }
+                tabBar
 
-                EditorTextView(
-                    text: $document.text,
-                    fontSize: fontSize,
-                    wrap: wrapLines,
-                    gotoLine: $gotoLine,
-                    isViewMode: $isViewMode
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let tab = workspace.selectedTab {
+                    TabEditorPane(tab: tab, fontSize: fontSize, wrapLines: wrapLines)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .id(tab.id)
+                } else {
+                    emptyEditorPlaceholder
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
 
                 if forth.isDebugSessionArmed {
                     DebugToolbar(forth: forth)
@@ -84,21 +63,17 @@ struct ContentView: View {
                     .frame(height: clampedConsole)
             }
             .onChange(of: geo.size.height) { _, _ in
-                // Keep stored height inside the new window bounds.
                 if consoleHeight > maxConsole {
                     consoleHeight = maxConsole
                 }
             }
         }
-        .background(WindowPathReader { window in
-            // DocumentGroup often leaves fileURL nil; representedURL arrives with the window.
-            if !gotoApplied {
-                applyPendingGoto(window: window)
-            }
-        })
+        .background(WindowChrome(url: workspace.selectedTab?.fileURL))
         .onAppear {
             installGotoObserver()
-            scheduleApplyPendingGoto()
+            forth.start()
+            // File opens / pending-goto / initial untitled are owned by AppDelegate.attach
+            // (runs from SixtyFourEditApp) so we do not create a stray Untitled tab first.
         }
         .onDisappear {
             if let gotoObserver {
@@ -109,19 +84,51 @@ struct ContentView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
         ) { _ in
-            scheduleApplyPendingGoto()
-        }
-        .onChange(of: document.text) { _, newText in
-            // DocumentGroup often delivers fileURL/text after first appear.
-            if !newText.isEmpty {
-                scheduleApplyPendingGoto()
-            }
+            workspace.handlePendingGoto()
         }
         .onChange(of: forth.debugLocation) { _, loc in
             guard let loc else { return }
-            applyDebugLocation(loc)
+            workspace.applyDebugLocation(path: loc.path, line: loc.line)
         }
     }
+
+    // MARK: - Tab bar
+
+    private var tabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(workspace.tabs) { tab in
+                    TabChip(
+                        title: tab.title,
+                        isSelected: tab.id == workspace.selectedTabID,
+                        onSelect: { workspace.selectedTabID = tab.id },
+                        onClose: { workspace.closeTab(id: tab.id) }
+                    )
+                }
+            }
+        }
+        .frame(height: 28)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+        }
+    }
+
+    private var emptyEditorPlaceholder: some View {
+        VStack(spacing: 12) {
+            Text("No file open")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text("Open a Forth source, or use EDIT / VIEW from 64Forth.")
+                .foregroundStyle(.secondary)
+            Button("Open…") { workspace.openPanel() }
+                .keyboardShortcut("o", modifiers: .command)
+        }
+    }
+
+    // MARK: - Console
 
     private var consolePane: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -177,41 +184,6 @@ struct ContentView: View {
         commandLine = ""
     }
 
-    /// Retry a few times: fileURL and document text can lag DocumentGroup open.
-    private func scheduleApplyPendingGoto() {
-        applyPendingGoto(window: nil)
-        for delay in [0.05, 0.15, 0.4, 1.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                applyPendingGoto(window: nil)
-            }
-        }
-    }
-
-    private func applyPendingGoto(window: NSWindow?) {
-        guard !gotoApplied else { return }
-        let candidates = PendingGoto.candidatePaths(explicit: fileURL, window: window)
-        guard !candidates.isEmpty else { return }
-        if let pending = PendingGoto.consumeIfMatches(candidates: candidates) {
-            gotoApplied = true
-            isViewMode = pending.viewMode
-            if pending.line > 0 {
-                gotoLine = pending.line
-            }
-        }
-    }
-
-    /// Sock `debugLocation`: scroll this window when it already shows the paused file.
-    private func applyDebugLocation(_ loc: ForthConnectionManager.DebugLocation) {
-        let candidates = PendingGoto.candidatePaths(explicit: fileURL, window: nil)
-        guard candidates.contains(where: { PendingGoto.pathsMatch($0, loc.path) }) else {
-            return
-        }
-        isViewMode = true
-        if loc.line > 0 {
-            gotoLine = loc.line
-        }
-    }
-
     private func installGotoObserver() {
         guard gotoObserver == nil else { return }
         gotoObserver = DistributedNotificationCenter.default().addObserver(
@@ -219,9 +191,98 @@ struct ContentView: View {
             object: nil,
             queue: .main
         ) { _ in
-            // userInfo is not delivered across processes; always use the pending file.
-            gotoApplied = false
-            scheduleApplyPendingGoto()
+            workspace.handlePendingGoto()
+        }
+    }
+}
+
+// MARK: - Tab UI
+
+private struct TabChip: View {
+    var title: String
+    var isSelected: Bool
+    var onSelect: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onSelect) {
+                Text(title)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Close tab")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(isSelected ? Color.accentColor : Color.clear)
+                .frame(height: 2)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+}
+
+/// Editor + view-mode banner for one tab (ObservedObject so text edits refresh dirty title).
+private struct TabEditorPane: View {
+    @ObservedObject var tab: EditorTab
+    var fontSize: Double
+    var wrapLines: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if tab.isViewMode {
+                HStack(spacing: 8) {
+                    Text("View mode")
+                        .fontWeight(.semibold)
+                    Text("Read-only — typing asks to switch to Edit")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Edit") {
+                        tab.isViewMode = false
+                    }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .background(Color.yellow.opacity(0.22))
+            }
+
+            EditorTextView(
+                text: Binding(
+                    get: { tab.text },
+                    set: { newValue in
+                        if tab.text != newValue {
+                            tab.text = newValue
+                            tab.isDirty = true
+                        }
+                    }
+                ),
+                fontSize: fontSize,
+                wrap: wrapLines,
+                gotoLine: $tab.gotoLine,
+                isViewMode: $tab.isViewMode,
+                selection: Binding(
+                    get: { tab.selection },
+                    set: { tab.selection = $0 }
+                ),
+                topVisibleLine: Binding(
+                    get: { tab.topVisibleLine },
+                    set: { tab.topVisibleLine = $0 }
+                )
+            )
         }
     }
 }
@@ -230,7 +291,6 @@ struct ContentView: View {
 private struct DebugToolbar: View {
     @ObservedObject var forth: ForthConnectionManager
 
-    /// Pale green when sock is up; pale orange when armed but disconnected.
     private var barColor: Color {
         forth.isConnected
             ? Color.green.opacity(0.18)
@@ -248,10 +308,9 @@ private struct DebugToolbar: View {
             Text("Debug")
                 .fontWeight(.semibold)
             Spacer(minLength: 8)
-            // No bare letter shortcuts — they would steal typing from the editor
-            // and command field. F6/F7/g/q still work in the 64Forth console.
             Button("Step Over") { forth.stepOver() }
             Button("Step Into") { forth.stepInto() }
+            Button("Step Out") { forth.stepOut() }
             Button("Continue") { forth.resumeDebug() }
             Button("Stop") { forth.stopDebug() }
                 .foregroundStyle(.red)
@@ -308,27 +367,33 @@ private struct ConsoleSplitter: View {
     }
 }
 
-/// Reads the hosting NSWindow so we can use representedURL when fileURL is nil.
-private struct WindowPathReader: NSViewRepresentable {
-    var onResolve: (NSWindow) -> Void
+/// Keep the window title / representedURL in sync with the selected tab.
+private struct WindowChrome: NSViewRepresentable {
+    var url: URL?
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { publish(from: view) }
+        DispatchQueue.main.async { apply(from: view) }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { publish(from: nsView) }
+        DispatchQueue.main.async { apply(from: nsView) }
     }
 
-    private func publish(from view: NSView) {
+    private func apply(from view: NSView) {
         guard let window = view.window else { return }
-        onResolve(window)
+        window.representedURL = url
+        if let url {
+            window.title = url.lastPathComponent
+        } else if window.title.isEmpty {
+            window.title = "64Edit"
+        }
     }
 }
 
 #Preview {
-    ContentView(document: .constant(ForthDocument()), fileURL: nil)
+    ContentView()
+        .environmentObject(WorkspaceModel())
         .environmentObject(ForthConnectionManager())
 }
