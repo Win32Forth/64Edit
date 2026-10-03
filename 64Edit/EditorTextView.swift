@@ -20,6 +20,13 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var selection: NSRange
     /// Per-tab 1-based top visible line.
     @Binding var topVisibleLine: Int
+    /// When 64Forth DEBUG is armed, F-keys (and view-mode letter keys) drive the stepper.
+    var isDebugArmed: Bool = false
+    var onDebugStepOver: (() -> Void)?
+    var onDebugStepInto: (() -> Void)?
+    var onDebugStepOut: (() -> Void)?
+    var onDebugContinue: (() -> Void)?
+    var onDebugStop: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -141,6 +148,7 @@ struct EditorTextView: NSViewRepresentable {
         weak var textView: NSTextView?
         private var keyMonitor: Any?
         private var scrollObserver: NSObjectProtocol?
+        private var focusObserver: NSObjectProtocol?
         private var isPrompting = false
         /// Skip writing bindings while we programmatically move caret/scroll.
         var suppressSave = false
@@ -156,6 +164,9 @@ struct EditorTextView: NSViewRepresentable {
             if let scrollObserver {
                 NotificationCenter.default.removeObserver(scrollObserver)
             }
+            if let focusObserver {
+                NotificationCenter.default.removeObserver(focusObserver)
+            }
         }
 
         func installKeyMonitor() {
@@ -164,6 +175,23 @@ struct EditorTextView: NSViewRepresentable {
                 guard let self else { return event }
                 return self.handleKeyDown(event)
             }
+            if focusObserver == nil {
+                focusObserver = NotificationCenter.default.addObserver(
+                    forName: .sixtyFourEditFocusEditor,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.takeKeyFocus()
+                }
+            }
+        }
+
+        /// Become first responder when DEBUG arms or a pause updates the location.
+        func takeKeyFocus() {
+            guard let tv = textView, let window = tv.window else { return }
+            // Only the selected tab's representable should win; skip detached views.
+            guard tv.window?.isKeyWindow == true || window == NSApp.keyWindow else { return }
+            window.makeFirstResponder(tv)
         }
 
         func installScrollObserver(on scroll: NSScrollView) {
@@ -300,15 +328,29 @@ struct EditorTextView: NSViewRepresentable {
             return current
         }
 
+        private func editorIsFocused(_ tv: NSTextView) -> Bool {
+            guard let window = tv.window, window.isKeyWindow else { return false }
+            let fr = window.firstResponder
+            return fr === tv
+                || fr === tv.enclosingScrollView
+                || (fr as? NSView)?.isDescendant(of: tv) == true
+        }
+
         private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
-            guard parent.isViewMode,
-                  let tv = textView,
-                  tv.window?.isKeyWindow == true,
-                  tv.window?.firstResponder === tv || tv.window?.firstResponder === tv.enclosingScrollView
-                    || (tv.window?.firstResponder as? NSView)?.isDescendant(of: tv) == true
-            else {
+            guard let tv = textView, editorIsFocused(tv) else {
                 return event
             }
+
+            // DEBUG armed: F-keys / ⌘⇧Y always; Forth letter keys only in view mode
+            // so edit-mode typing and the console field stay unaffected.
+            if parent.isDebugArmed, tryHandleDebugKey(event) {
+                return nil
+            }
+
+            guard parent.isViewMode else {
+                return event
+            }
+
             // Allow navigation / copy / find; block edits.
             if event.modifierFlags.contains(.command) {
                 let chars = event.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -346,6 +388,75 @@ struct EditorTextView: NSViewRepresentable {
                 }
             }
             return event
+        }
+
+        /// Consume Forth DEBUG keys while the session is armed. Returns true if handled.
+        ///
+        /// F5 continue, F6 over, F7 into, F8 out, ⌘⇧Y continue — always.
+        /// Space/o/Return over, i into, g continue, q/Esc stop, h swallow — view mode only.
+        private func tryHandleDebugKey(_ event: NSEvent) -> Bool {
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // ⌘⇧Y = continue (same as 64Forth console).
+            if mods.contains(.command), mods.contains(.shift),
+               (event.charactersIgnoringModifiers?.lowercased() ?? "") == "y" {
+                parent.onDebugContinue?()
+                return true
+            }
+
+            // Function keys by hardware keyCode (AppKit: F5=96 … F8=100).
+            switch event.keyCode {
+            case 96:  // F5
+                parent.onDebugContinue?()
+                return true
+            case 97:  // F6
+                parent.onDebugStepOver?()
+                return true
+            case 98:  // F7
+                parent.onDebugStepInto?()
+                return true
+            case 100: // F8
+                parent.onDebugStepOut?()
+                return true
+            default:
+                break
+            }
+
+            // Letter / Esc / Return only in view mode — never steal edit-mode typing.
+            guard parent.isViewMode else { return false }
+            if mods.contains(.command) || mods.contains(.option) || mods.contains(.control) {
+                return false
+            }
+
+            if event.keyCode == 53 { // Esc → stop
+                parent.onDebugStop?()
+                return true
+            }
+            if event.keyCode == 36 { // Return → step over
+                parent.onDebugStepOver?()
+                return true
+            }
+
+            let ch = event.charactersIgnoringModifiers?.lowercased() ?? ""
+            switch ch {
+            case " ", "o":
+                parent.onDebugStepOver?()
+                return true
+            case "i":
+                parent.onDebugStepInto?()
+                return true
+            case "g":
+                parent.onDebugContinue?()
+                return true
+            case "q":
+                parent.onDebugStop?()
+                return true
+            case "h":
+                // Console prints help; here just avoid the edit-mode prompt.
+                return true
+            default:
+                return false
+            }
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {

@@ -193,14 +193,28 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         case .executionFinished(let exitCode):
             appendConsole("Finished (\(exitCode))")
         case .error(let message):
+            // Late duplicate step/resume after disarm is a race, not a connection
+            // failure — keep it out of the sticky red status line.
+            if message == "debugger not armed" {
+                return
+            }
             lastError = message
             appendConsole("Error: \(message)")
         case .debugSession(let armed):
             isDebugSessionArmed = armed
             if !armed {
                 debugLocation = nil
+                if lastError == "debugger not armed" {
+                    lastError = nil
+                }
             }
         case .debugLocation(let path, let line):
+            // A pause location implies the stepper is live; arm immediately so
+            // letter keys do not race the debugSession poll / paint notify.
+            isDebugSessionArmed = true
+            if lastError == "debugger not armed" {
+                lastError = nil
+            }
             debugLocation = DebugLocation(path: path, line: line)
         }
     }

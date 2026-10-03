@@ -211,6 +211,17 @@ final class WorkspaceModel: ObservableObject {
         )
     }
 
+    /// Toggle browse (VIEW) ↔ edit for the selected tab. Browse is read-only.
+    func toggleBrowseMode() {
+        guard let tab = selectedTab else { return }
+        tab.isViewMode.toggle()
+    }
+
+    func setBrowseMode(_ browse: Bool) {
+        guard let tab = selectedTab else { return }
+        tab.isViewMode = browse
+    }
+
     // MARK: - Internals
 
     private func findTab(matching path: String) -> EditorTab? {

@@ -60,7 +60,13 @@ struct SixtyFourEditApp: App {
                 }
                 .keyboardShortcut("w", modifiers: .command)
             }
-            CommandGroup(after: .textFormatting) {
+            // Merge into the system View menu (CommandMenu("View") creates a second one).
+            CommandGroup(after: .toolbar) {
+                Button(workspace.selectedTab?.isViewMode == true ? "Allow Editing" : "Browse Mode") {
+                    workspace.toggleBrowseMode()
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(workspace.selectedTab == nil)
             }
             CommandMenu("Format") {
                 Button("Bigger") {

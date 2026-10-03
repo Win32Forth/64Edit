@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var commandLine = ""
     @State private var gotoObserver: NSObjectProtocol?
     @State private var dragStartHeight: CGFloat?
+    @State private var debugKeys = DebugKeyMonitor()
 
     private static let consoleMinHeight: CGFloat = 88
     private static let editorMinHeight: CGFloat = 120
@@ -34,7 +35,17 @@ struct ContentView: View {
                 tabBar
 
                 if let tab = workspace.selectedTab {
-                    TabEditorPane(tab: tab, fontSize: fontSize, wrapLines: wrapLines)
+                    TabEditorPane(
+                        tab: tab,
+                        fontSize: fontSize,
+                        wrapLines: wrapLines,
+                        isDebugArmed: forth.isDebugSessionArmed,
+                        onDebugStepOver: { forth.stepOver() },
+                        onDebugStepInto: { forth.stepInto() },
+                        onDebugStepOut: { forth.stepOut() },
+                        onDebugContinue: { forth.resumeDebug() },
+                        onDebugStop: { forth.stopDebug() }
+                    )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .id(tab.id)
                 } else {
@@ -72,6 +83,7 @@ struct ContentView: View {
         .onAppear {
             installGotoObserver()
             forth.start()
+            debugKeys.attach(forth: forth, workspace: workspace)
             // File opens / pending-goto / initial untitled are owned by AppDelegate.attach
             // (runs from SixtyFourEditApp) so we do not create a stray Untitled tab first.
         }
@@ -80,6 +92,7 @@ struct ContentView: View {
                 DistributedNotificationCenter.default().removeObserver(gotoObserver)
                 self.gotoObserver = nil
             }
+            debugKeys.remove()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
@@ -89,6 +102,15 @@ struct ContentView: View {
         .onChange(of: forth.debugLocation) { _, loc in
             guard let loc else { return }
             workspace.applyDebugLocation(path: loc.path, line: loc.line)
+            if forth.isDebugSessionArmed {
+                DispatchQueue.main.async { EditorFocus.request() }
+            }
+        }
+        .onChange(of: forth.isDebugSessionArmed) { _, armed in
+            if armed {
+                // Drop console-field focus; DEBUG pauses reject executeCommand anyway.
+                DispatchQueue.main.async { EditorFocus.request() }
+            }
         }
     }
 
@@ -164,11 +186,20 @@ struct ContentView: View {
                 }
             }
             HStack {
-                TextField("Forth command", text: $commandLine)
+                TextField(
+                    forth.isDebugSessionArmed
+                        ? "Debugger paused — use Step / F5–F8"
+                        : "Forth command",
+                    text: $commandLine
+                )
                     .textFieldStyle(.roundedBorder)
+                    .disabled(forth.isDebugSessionArmed)
                     .onSubmit(sendCommand)
                 Button("Send", action: sendCommand)
-                    .disabled(commandLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        forth.isDebugSessionArmed
+                            || commandLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
             }
         }
         .font(.system(size: 12, design: .monospaced))
@@ -238,6 +269,12 @@ private struct TabEditorPane: View {
     @ObservedObject var tab: EditorTab
     var fontSize: Double
     var wrapLines: Bool
+    var isDebugArmed: Bool
+    var onDebugStepOver: () -> Void
+    var onDebugStepInto: () -> Void
+    var onDebugStepOut: () -> Void
+    var onDebugContinue: () -> Void
+    var onDebugStop: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -245,7 +282,11 @@ private struct TabEditorPane: View {
                 HStack(spacing: 8) {
                     Text("View mode")
                         .fontWeight(.semibold)
-                    Text("Read-only — typing asks to switch to Edit")
+                    Text(
+                        isDebugArmed
+                            ? "Read-only — F5–F8 / i o Space g q drive the stepper"
+                            : "Read-only — typing asks to switch to Edit"
+                    )
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("Edit") {
@@ -281,13 +322,23 @@ private struct TabEditorPane: View {
                 topVisibleLine: Binding(
                     get: { tab.topVisibleLine },
                     set: { tab.topVisibleLine = $0 }
-                )
+                ),
+                isDebugArmed: isDebugArmed,
+                onDebugStepOver: onDebugStepOver,
+                onDebugStepInto: onDebugStepInto,
+                onDebugStepOut: onDebugStepOut,
+                onDebugContinue: onDebugContinue,
+                onDebugStop: onDebugStop
             )
         }
     }
 }
 
 /// Shown while 64Forth ITC DEBUG / TDBG is armed; hidden otherwise.
+///
+/// F5–F8 / ⌘⇧Y are wired here so they still work when focus is in the console
+/// field. Bare letters stay off the toolbar so they never steal edit-mode typing;
+/// view-mode letter mapping lives in `EditorTextView` only while armed.
 private struct DebugToolbar: View {
     @ObservedObject var forth: ForthConnectionManager
 
@@ -309,11 +360,27 @@ private struct DebugToolbar: View {
                 .fontWeight(.semibold)
             Spacer(minLength: 8)
             Button("Step Over") { forth.stepOver() }
+                .keyboardShortcut(Self.f6)
+                .help("Step Over (F6)")
             Button("Step Into") { forth.stepInto() }
+                .keyboardShortcut(Self.f7)
+                .help("Step Into (F7)")
             Button("Step Out") { forth.stepOut() }
+                .keyboardShortcut(Self.f8)
+                .help("Step Out (F8)")
             Button("Continue") { forth.resumeDebug() }
+                .keyboardShortcut(Self.f5)
+                .help("Continue (F5 or ⌘⇧Y)")
+            // Second Continue binding (Forth console uses ⌘⇧Y / g).
+            Button("") { forth.resumeDebug() }
+                .keyboardShortcut("y", modifiers: [.command, .shift])
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
             Button("Stop") { forth.stopDebug() }
+                .keyboardShortcut(.escape)
                 .foregroundStyle(.red)
+                .help("Stop (Esc)")
         }
         .font(.system(size: 11))
         .buttonStyle(.bordered)
@@ -322,9 +389,17 @@ private struct DebugToolbar: View {
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity)
         .background(barColor)
+        .contentShape(Rectangle())
+        .onTapGesture { EditorFocus.request() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Debug toolbar")
+        .help("F6 over · F7 into · F8 out · F5/⌘⇧Y continue · Esc stop — click to focus editor")
     }
+
+    private static let f5 = KeyEquivalent(Character(UnicodeScalar(NSF5FunctionKey)!))
+    private static let f6 = KeyEquivalent(Character(UnicodeScalar(NSF6FunctionKey)!))
+    private static let f7 = KeyEquivalent(Character(UnicodeScalar(NSF7FunctionKey)!))
+    private static let f8 = KeyEquivalent(Character(UnicodeScalar(NSF8FunctionKey)!))
 }
 
 /// Drag handle between editor and console; drag up to grow the console.
