@@ -2,7 +2,7 @@
 //  FindSupport.swift
 //  64Edit
 //
-//  TextEdit-style find bar for EditorNSTextView / ConsoleNSTextView.
+//  TextEdit-style find / replace bar for EditorNSTextView / ConsoleNSTextView.
 //  SwiftUI's default Edit→Find often never reaches an embedded NSTextView,
 //  so menu items call performTextFinderAction on the focused (or preferred) view.
 //

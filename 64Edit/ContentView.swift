@@ -13,7 +13,6 @@ struct ContentView: View {
     @EnvironmentObject private var workspace: WorkspaceModel
     @EnvironmentObject private var forth: ForthConnectionManager
     @AppStorage("editorFontSize") private var fontSize = 13.0
-    @AppStorage("editorWrap") private var wrapLines = false
     @AppStorage("consolePaneHeight") private var consoleHeight = 160.0
     @State private var commandLine = ""
     @State private var gotoObserver: NSObjectProtocol?
@@ -38,14 +37,15 @@ struct ContentView: View {
                     TabEditorPane(
                         tab: tab,
                         fontSize: fontSize,
-                        wrapLines: wrapLines,
                         isDebugArmed: forth.isDebugSessionArmed,
+                        breakpointNames: forth.breakpointNames,
                         onDebugStepOver: { forth.stepOver() },
                         onDebugStepInto: { forth.stepInto() },
                         onDebugStepOut: { forth.stepOut() },
                         onDebugContinue: { forth.resumeDebug() },
                         onDebugStop: { forth.stopDebug() },
-                        onCommandClickWord: { word in forth.viewWord(word) }
+                        onCommandClickWord: { word in forth.viewWord(word) },
+                        onToggleBreakpoint: { word in forth.toggleBreakpoint(word) }
                     )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .id(tab.id)
@@ -285,14 +285,15 @@ private struct TabChip: View {
 private struct TabEditorPane: View {
     @ObservedObject var tab: EditorTab
     var fontSize: Double
-    var wrapLines: Bool
     var isDebugArmed: Bool
+    var breakpointNames: [String]
     var onDebugStepOver: () -> Void
     var onDebugStepInto: () -> Void
     var onDebugStepOut: () -> Void
     var onDebugContinue: () -> Void
     var onDebugStop: () -> Void
     var onCommandClickWord: (String) -> Void
+    var onToggleBreakpoint: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -330,7 +331,6 @@ private struct TabEditorPane: View {
                     }
                 ),
                 fontSize: fontSize,
-                wrap: wrapLines,
                 gotoLine: $tab.gotoLine,
                 highlightName: $tab.highlightName,
                 highlightOff: $tab.highlightOff,
@@ -346,12 +346,14 @@ private struct TabEditorPane: View {
                     set: { tab.topVisibleLine = $0 }
                 ),
                 isDebugArmed: isDebugArmed,
+                breakpointNames: breakpointNames,
                 onDebugStepOver: onDebugStepOver,
                 onDebugStepInto: onDebugStepInto,
                 onDebugStepOut: onDebugStepOut,
                 onDebugContinue: onDebugContinue,
                 onDebugStop: onDebugStop,
-                onCommandClickWord: onCommandClickWord
+                onCommandClickWord: onCommandClickWord,
+                onToggleBreakpoint: onToggleBreakpoint
             )
         }
     }

@@ -41,6 +41,8 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     @Published private(set) var viewMissSeq: UInt = 0
     /// Token from the last `viewResult(opened: false)` (empty when none).
     @Published private(set) var viewMissWord: String = ""
+    /// Word names currently in the host BREAK table (pale-red wash in the editor).
+    @Published private(set) var breakpointNames: [String] = []
 
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -108,6 +110,7 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         isConnected = false
         isDebugSessionArmed = false
         debugLocation = nil
+        breakpointNames = []
     }
 
     func stepOver() { send(.stepOver) }
@@ -115,6 +118,30 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     func stepOut() { send(.stepOut) }
     func resumeDebug() { send(.resume) }
     func stopDebug() { send(.stop) }
+
+    /// F9 / ⌘\: toggle BREAK on a dictionary word via `TOGGLE-BREAK` on the host.
+    /// Refuses while DEBUG is paused (host cannot evaluate then).
+    func toggleBreakpoint(_ word: String) {
+        let name = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        else { return }
+        if isDebugSessionArmed {
+            lastError = "debugger paused — use Step/Continue"
+            appendConsole("BREAK \(name): debugger paused\n")
+            return
+        }
+        if fd < 0 {
+            start()
+        }
+        guard fd >= 0 else {
+            lastError = lastError ?? "64Forth is not listening — start 64Forth first"
+            appendConsole("BREAK: not connected\n")
+            return
+        }
+        lastError = nil
+        send(.toggleBreakpoint(name: name))
+    }
 
     /// ⌘-click goto-source: `viewWord` over edit.sock → `viewResult`.
     /// On miss (`opened: false`) or when disconnected, bumps `viewMissSeq` so the
@@ -196,6 +223,7 @@ final class ForthConnectionManager: NSObject, ObservableObject {
                 self.isConnected = false
                 self.isDebugSessionArmed = false
                 self.debugLocation = nil
+                self.breakpointNames = []
                 self.lastError = "64Forth connection closed"
             }
             readSource?.cancel()
@@ -280,6 +308,8 @@ final class ForthConnectionManager: NSObject, ObservableObject {
                 viewMissSeqCounter &+= 1
                 viewMissSeq = viewMissSeqCounter
             }
+        case .breakpoints(let names):
+            breakpointNames = names
         }
     }
 

@@ -11,7 +11,6 @@ import AppKit
 struct EditorTextView: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat
-    var wrap: Bool
     /// 1-based line to reveal once; ContentView clears after apply.
     @Binding var gotoLine: Int?
     /// DEBUG peek token to highlight near `gotoLine` (pastel green); cleared after apply.
@@ -29,6 +28,8 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var topVisibleLine: Int
     /// When 64Forth DEBUG is armed, F-keys (and view-mode letter keys) drive the stepper.
     var isDebugArmed: Bool = false
+    /// Word names currently in the host BREAK table (pale-red wash).
+    var breakpointNames: [String] = []
     var onDebugStepOver: (() -> Void)?
     var onDebugStepInto: (() -> Void)?
     var onDebugStepOut: (() -> Void)?
@@ -36,10 +37,17 @@ struct EditorTextView: NSViewRepresentable {
     var onDebugStop: (() -> Void)?
     /// ⌘-click on a Forth token → Hyper VIEW via IPC (`VIEW <word>`).
     var onCommandClickWord: ((String) -> Void)?
+    /// F9 / ⌘\ / Debug menu: toggle BREAK on the Forth token under the caret.
+    var onToggleBreakpoint: ((String) -> Void)?
 
     /// Same wash as the Debug toolbar when connected (`Color.green.opacity(0.18)`).
     static var debugHighlightColor: NSColor {
         NSColor.systemGreen.withAlphaComponent(0.18)
+    }
+
+    /// Pale red wash for words currently in the BREAK table.
+    static var breakpointHighlightColor: NSColor {
+        NSColor.systemRed.withAlphaComponent(0.14)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -69,13 +77,14 @@ struct EditorTextView: NSViewRepresentable {
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                             height: CGFloat.greatestFiniteMagnitude)
         tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = !wrap
+        // Always hard-wrap off (⌘\ is Toggle Breakpoint).
+        tv.isHorizontallyResizable = true
         tv.textContainer?.containerSize = NSSize(
-            width: wrap ? 100 : CGFloat.greatestFiniteMagnitude,
+            width: CGFloat.greatestFiniteMagnitude,
             height: CGFloat.greatestFiniteMagnitude
         )
-        tv.textContainer?.widthTracksTextView = wrap
-        tv.autoresizingMask = wrap ? [.width] : []
+        tv.textContainer?.widthTracksTextView = false
+        tv.autoresizingMask = []
 
         scroll.documentView = tv
         let ruler = LineNumberRulerView(textView: tv)
@@ -111,20 +120,13 @@ struct EditorTextView: NSViewRepresentable {
         tv.isEditable = !isViewMode
         context.coordinator.lineNumberRuler?.syncFont(from: tv)
 
-        tv.isHorizontallyResizable = !wrap
-        tv.autoresizingMask = wrap ? [.width] : []
-        tv.textContainer?.widthTracksTextView = wrap
-        if wrap {
-            tv.textContainer?.containerSize = NSSize(
-                width: scroll.contentSize.width,
-                height: CGFloat.greatestFiniteMagnitude
-            )
-        } else {
-            tv.textContainer?.containerSize = NSSize(
-                width: CGFloat.greatestFiniteMagnitude,
-                height: CGFloat.greatestFiniteMagnitude
-            )
-        }
+        tv.isHorizontallyResizable = true
+        tv.autoresizingMask = []
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
 
         // Session ended: drop the wash. Do **not** clear when highlightName is
         // merely consumed (finishGoto/finishHighlightOnly nil it after apply) —
@@ -132,6 +134,9 @@ struct EditorTextView: NSViewRepresentable {
         if !isDebugArmed {
             context.coordinator.clearDebugHighlight()
         }
+
+        // BREAK-table wash (independent of DEBUG green).
+        context.coordinator.applyBreakpointWash(names: breakpointNames, force: textChanged)
 
         if let line = gotoLine, line > 0 {
             context.coordinator.needsRestore = false
@@ -292,8 +297,13 @@ struct EditorTextView: NSViewRepresentable {
         var needsRestore = false
         /// Character range of the last pastel-green DEBUG token highlight.
         private var debugHighlightRange: NSRange?
+        /// Character ranges painted pale-red for BREAK-table words.
+        private var breakpointHighlightRanges: [NSRange] = []
+        /// Last applied BREAK name list (skip redundant rewashes).
+        private var lastBreakpointNames: [String] = []
         /// SZ-style 5-column line-number gutter (source editor only).
         weak var lineNumberRuler: LineNumberRulerView?
+        private var toggleBreakpointObserver: NSObjectProtocol?
 
         init(_ parent: EditorTextView) { self.parent = parent }
 
@@ -307,6 +317,77 @@ struct EditorTextView: NSViewRepresentable {
                 layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: prev)
             }
             debugHighlightRange = nil
+        }
+
+        func clearBreakpointWash() {
+            guard let tv = textView, let layout = tv.layoutManager else {
+                breakpointHighlightRanges = []
+                lastBreakpointNames = []
+                return
+            }
+            let charCount = (tv.string as NSString).length
+            for prev in breakpointHighlightRanges where NSMaxRange(prev) <= charCount {
+                // Leave the live DEBUG green wash alone when ranges overlap.
+                if let dbg = debugHighlightRange, NSIntersectionRange(dbg, prev).length > 0 {
+                    continue
+                }
+                layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: prev)
+            }
+            breakpointHighlightRanges = []
+            lastBreakpointNames = []
+        }
+
+        /// Whole-word pale-red wash for every occurrence of each BREAK name.
+        ///
+        /// Must scan forward-only. `forthTokenRange(at:)` backs up from a blank
+        /// into the previous token (caret/F9 semantics); using it here left
+        /// `idx` on that blank forever → main-thread spin / beach ball.
+        func applyBreakpointWash(names: [String], force: Bool = false) {
+            guard let tv = textView else { return }
+            let normalized = names
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !force, normalized == lastBreakpointNames { return }
+            clearBreakpointWash()
+            lastBreakpointNames = normalized
+            guard !normalized.isEmpty, let layout = tv.layoutManager else { return }
+            let ns = tv.string as NSString
+            let charCount = ns.length
+            var painted: [NSRange] = []
+            let nameSet = Set(normalized)
+            func isSep(_ c: unichar) -> Bool {
+                c == 32 || c == 9 || c == 10 || c == 13
+            }
+            var idx = 0
+            while idx < charCount {
+                if isSep(ns.character(at: idx)) {
+                    idx += 1
+                    continue
+                }
+                var hi = idx + 1
+                while hi < charCount && !isSep(ns.character(at: hi)) { hi += 1 }
+                let range = NSRange(location: idx, length: hi - idx)
+                let token = ns.substring(with: range)
+                if nameSet.contains(token) {
+                    // Do not overwrite the live DEBUG green wash.
+                    let overlapsDebug = debugHighlightRange.map {
+                        NSIntersectionRange($0, range).length > 0
+                    } ?? false
+                    if !overlapsDebug {
+                        layout.addTemporaryAttribute(
+                            .backgroundColor,
+                            value: EditorTextView.breakpointHighlightColor,
+                            forCharacterRange: range
+                        )
+                        painted.append(range)
+                    }
+                }
+                idx = hi
+            }
+            breakpointHighlightRanges = painted
+            for range in painted {
+                layout.invalidateDisplay(forCharacterRange: range)
+            }
         }
 
         /// Prefer dbg-map file-relative `off`/`len` when present; else whole-word
@@ -376,6 +457,9 @@ struct EditorTextView: NSViewRepresentable {
             if let focusObserver {
                 NotificationCenter.default.removeObserver(focusObserver)
             }
+            if let toggleBreakpointObserver {
+                NotificationCenter.default.removeObserver(toggleBreakpointObserver)
+            }
         }
 
         func installCommandClick(on tv: EditorNSTextView) {
@@ -399,6 +483,28 @@ struct EditorTextView: NSViewRepresentable {
                     self?.takeKeyFocus()
                 }
             }
+            if toggleBreakpointObserver == nil {
+                toggleBreakpointObserver = NotificationCenter.default.addObserver(
+                    forName: .sixtyFourEditToggleBreakpoint,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.toggleBreakpointUnderCaret()
+                }
+            }
+        }
+
+        /// F9 / ⌘\ / Debug menu: toggle BREAK on the whitespace-delimited token at the caret.
+        func toggleBreakpointUnderCaret() {
+            guard let tv = textView else { return }
+            let ns = tv.string as NSString
+            var idx = tv.selectedRange().location
+            if idx > ns.length { idx = ns.length }
+            guard let word = EditorNSTextView.forthToken(at: idx, in: ns),
+                  !word.isEmpty,
+                  word.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+            else { return }
+            parent.onToggleBreakpoint?(word)
         }
 
         /// Become first responder when DEBUG arms or a pause updates the location.
@@ -558,6 +664,11 @@ struct EditorTextView: NSViewRepresentable {
                 return event
             }
 
+            // F9 / ⌘\ — toggle BREAK under caret (works while idle or debugging).
+            if tryHandleBreakpointKey(event) {
+                return nil
+            }
+
             // DEBUG armed: F-keys / ⌘⇧Y always; Forth letter keys only in view mode
             // so edit-mode typing and the console field stay unaffected.
             if parent.isDebugArmed, tryHandleDebugKey(event) {
@@ -595,6 +706,21 @@ struct EditorTextView: NSViewRepresentable {
                 return nil
             }
             return event
+        }
+
+        /// F9 or ⌘\ toggles BREAK on the token under the caret.
+        private func tryHandleBreakpointKey(_ event: NSEvent) -> Bool {
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if !mods.contains(.command), event.keyCode == 101 { // F9
+                toggleBreakpointUnderCaret()
+                return true
+            }
+            if mods.contains(.command), !mods.contains(.shift),
+               (event.charactersIgnoringModifiers ?? "") == "\\" {
+                toggleBreakpointUnderCaret()
+                return true
+            }
+            return false
         }
 
         /// Consume Forth DEBUG keys while the session is armed. Returns true if handled.
@@ -709,8 +835,8 @@ final class EditorNSTextView: NSTextView {
         super.keyDown(with: event)
     }
 
-    /// Whitespace-delimited Forth token at UTF-16 index (same rules as 64Forth console).
-    static func forthToken(at idx: Int, in ns: NSString) -> String? {
+    /// Whitespace-delimited Forth token range at UTF-16 index (same rules as 64Forth console).
+    static func forthTokenRange(at idx: Int, in ns: NSString) -> NSRange? {
         guard ns.length > 0 else { return nil }
         var i = min(max(0, idx), ns.length)
         func isSep(_ c: unichar) -> Bool {
@@ -725,8 +851,14 @@ final class EditorNSTextView: NSTextView {
         var hi = i + 1
         while lo > 0 && !isSep(ns.character(at: lo - 1)) { lo -= 1 }
         while hi < ns.length && !isSep(ns.character(at: hi)) { hi += 1 }
-        let token = ns.substring(with: NSRange(location: lo, length: hi - lo))
-        return token.isEmpty ? nil : token
+        let range = NSRange(location: lo, length: hi - lo)
+        return range.length > 0 ? range : nil
+    }
+
+    /// Whitespace-delimited Forth token at UTF-16 index (same rules as 64Forth console).
+    static func forthToken(at idx: Int, in ns: NSString) -> String? {
+        guard let range = forthTokenRange(at: idx, in: ns) else { return nil }
+        return ns.substring(with: range)
     }
 }
 

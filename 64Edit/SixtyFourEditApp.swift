@@ -65,7 +65,7 @@ struct SixtyFourEditApp: App {
                 }
                 .keyboardShortcut("w", modifiers: .command)
             }
-            // TextEdit-style find bar on the focused editor / console NSTextView.
+            // TextEdit-style find/replace bar on the focused editor / console NSTextView.
             // (SwiftUI Edit→Find alone often misses embedded AppKit text views.)
             CommandGroup(after: .pasteboard) {
                 Divider()
@@ -73,6 +73,10 @@ struct SixtyFourEditApp: App {
                     FindSupport.perform(.showFindInterface)
                 }
                 .keyboardShortcut("f", modifiers: .command)
+                Button("Find and Replace…") {
+                    FindSupport.perform(.showReplaceInterface)
+                }
+                .keyboardShortcut("f", modifiers: [.command, .option])
                 Button("Find Next") {
                     FindSupport.perform(.nextMatch)
                 }
@@ -85,6 +89,16 @@ struct SixtyFourEditApp: App {
                     FindSupport.perform(.setSearchString)
                 }
                 // No ⌘E — that stays free for future VIEW-under-caret; use the menu.
+                Divider()
+                Button("Replace") {
+                    FindSupport.perform(.replace)
+                }
+                Button("Replace and Find Next") {
+                    FindSupport.perform(.replaceAndFind)
+                }
+                Button("Replace All") {
+                    FindSupport.perform(.replaceAll)
+                }
             }
             // Merge into the system View menu (CommandMenu("View") creates a second one).
             CommandGroup(after: .toolbar) {
@@ -108,11 +122,15 @@ struct SixtyFourEditApp: App {
                 Button("Reset Size (13)") {
                     UserDefaults.standard.set(13.0, forKey: "editorFontSize")
                 }
-
-                Toggle("Wrap Lines", isOn: Binding(
-                    get: { UserDefaults.standard.object(forKey: "editorWrap") as? Bool ?? true },
-                    set: { UserDefaults.standard.set($0, forKey: "editorWrap") }
-                ))
+            }
+            // ⌘\ freed from Wrap Lines — toggle BREAK on the word under the caret.
+            CommandMenu("Debug") {
+                Button("Toggle Breakpoint") {
+                    NotificationCenter.default.post(
+                        name: .sixtyFourEditToggleBreakpoint,
+                        object: nil
+                    )
+                }
                 .keyboardShortcut("\\", modifiers: [.command])
             }
         }

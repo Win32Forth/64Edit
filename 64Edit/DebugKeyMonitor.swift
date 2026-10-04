@@ -12,6 +12,8 @@ import AppKit
 extension Notification.Name {
     /// Ask the active editor NSTextView to take first responder.
     static let sixtyFourEditFocusEditor = Notification.Name("com.Win32Forth.64Edit.focusEditor")
+    /// Debug → Toggle Breakpoint / ⌘\: toggle BREAK on the Forth token under the caret.
+    static let sixtyFourEditToggleBreakpoint = Notification.Name("com.Win32Forth.64Edit.toggleBreakpoint")
 }
 
 enum EditorFocus {
@@ -60,9 +62,26 @@ final class DebugKeyMonitor {
     deinit { remove() }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard let forth, forth.isDebugSessionArmed else { return event }
         // Leave modal alerts alone if any are up.
         if NSApp.modalWindow != nil { return event }
+
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // F9 / ⌘\ — toggle BREAK under the editor caret (works idle or armed).
+        // When the editor is first responder, EditorTextView handles these keys.
+        if !EditorFocus.editorIsKeyFirstResponder() {
+            if !mods.contains(.command), event.keyCode == 101 { // F9
+                NotificationCenter.default.post(name: .sixtyFourEditToggleBreakpoint, object: nil)
+                return nil
+            }
+            if mods.contains(.command), !mods.contains(.shift),
+               (event.charactersIgnoringModifiers ?? "") == "\\" {
+                NotificationCenter.default.post(name: .sixtyFourEditToggleBreakpoint, object: nil)
+                return nil
+            }
+        }
+
+        guard let forth, forth.isDebugSessionArmed else { return event }
 
         // EditorTextView also installs a local key monitor. All local monitors
         // see the same event, so handling here while the editor is focused
@@ -71,8 +90,6 @@ final class DebugKeyMonitor {
         if EditorFocus.editorIsKeyFirstResponder() {
             return event
         }
-
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         // ⌘⇧Y = continue (Forth console).
         if mods.contains(.command), mods.contains(.shift),

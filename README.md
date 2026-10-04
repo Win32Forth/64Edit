@@ -54,7 +54,7 @@ Single `Window("64Edit")` with tabs (not DocumentGroup):
 - Pending-goto and `debugLocation` find-or-open by path/inode; nested DEBUG steps open multiple files and restore the prior tab when stepping out
 - Per-tab caret and top visible line on tab switch
 - **Line numbers** (source editor only): SZ / FILE-ECHO style 5-column right-justified gutter
-- **Find:** Edit → Find… / Find Next / Find Previous (`⌘F` / `⌘G` / `⌘⇧G`) on the TextEdit-style find bar
+- **Find / Replace:** Edit → Find… / Find and Replace… / Find Next / Find Previous (`⌘F` / `⌥⌘F` / `⌘G` / `⌘⇧G`), plus Replace / Replace and Find Next / Replace All on the TextEdit-style find bar (no-op while a tab is in browse/view mode)
 - **⌘-click VIEW:** sends sock `viewWord`; on miss or when Forth is disconnected, searches the open file and opens the find bar (`Hyper: not connected` note ends with a CR)
 - Home / End → start/end of line; ⌘-Home / ⌘-End → start/end of file (Shift extends selection)
 - **Debug toolbar** while 64Forth ITC DEBUG/TDBG is armed: Step Over / Into / Out / Continue / Stop
@@ -64,8 +64,9 @@ Single `Window("64Edit")` with tabs (not DocumentGroup):
 - **View → Browse Mode** (⌘⇧B) toggles browse ↔ Allow Editing (system View menu)
 - Ping reconnects the socket only (never evaluates Forth / WORDS)
 - **DEBUG word highlight:** prefers dbg-map `off`/`len` from sock `debugLocation`; else whole-word name search near the VIEW line with runtime→source aliases. Pastel green wash; clears on next pause or session end.
+- **Pass 1 BREAK toggle:** **F9** / **⌘\\** / Debug → Toggle Breakpoint marks the Forth token under the caret via sock `toggleBreakpoint` → host `TOGGLE-BREAK` (8 xt slots). Pale-red wash for names in `breakpoints(names:)`. Breaks fire under **`BPGO <word>`**, not on toggle alone. Idle only while DEBUG is paused. ⌘\\ is no longer Wrap Lines (hard wrap stays off).
 
-Still ahead: splits, session restore, breakpoints, deeper XPC.
+Still ahead: splits, session restore, Pass 2 BREAK list/clear/disable + gutter, deeper XPC.
 
 ## Build
 
