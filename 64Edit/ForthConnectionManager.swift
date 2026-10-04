@@ -41,8 +41,16 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     @Published private(set) var viewMissSeq: UInt = 0
     /// Token from the last `viewResult(opened: false)` (empty when none).
     @Published private(set) var viewMissWord: String = ""
-    /// Word names currently in the host BREAK table (pale-red wash in the editor).
-    @Published private(set) var breakpointNames: [String] = []
+    /// BREAK table slots from the host (pale-red wash uses enabled names).
+    @Published private(set) var breakpointEntries: [BreakpointEntry] = []
+    /// Enabled BREAK names (pale-red wash).
+    var breakpointNames: [String] {
+        breakpointEntries.filter(\.enabled).map(\.name)
+    }
+    /// All BREAK names including disabled (panel list).
+    var allBreakpointNames: [String] {
+        breakpointEntries.map(\.name)
+    }
 
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -110,7 +118,7 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         isConnected = false
         isDebugSessionArmed = false
         debugLocation = nil
-        breakpointNames = []
+        breakpointEntries = []
     }
 
     func stepOver() { send(.stepOver) }
@@ -118,6 +126,60 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     func stepOut() { send(.stepOut) }
     func resumeDebug() { send(.resume) }
     func stopDebug() { send(.stop) }
+
+    /// Remove a BREAK slot (works while paused).
+    func removeBreakpoint(_ word: String) {
+        let name = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        else { return }
+        if fd < 0 { start() }
+        guard fd >= 0 else {
+            lastError = lastError ?? "64Forth is not listening — start 64Forth first"
+            return
+        }
+        lastError = nil
+        send(.removeBreakpoint(name: name))
+    }
+
+    /// Enable or disable a BREAK without removing it (works while paused).
+    func setBreakpointEnabled(_ word: String, enabled: Bool) {
+        let name = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        else { return }
+        if fd < 0 { start() }
+        guard fd >= 0 else {
+            lastError = lastError ?? "64Forth is not listening — start 64Forth first"
+            return
+        }
+        lastError = nil
+        send(.setBreakpointEnabled(name: name, enabled: enabled))
+    }
+
+    /// Idle: `BPGO <name>`. Paused: set go-until-break and Continue.
+    func armBreakGo(runWord: String? = nil) {
+        if fd < 0 { start() }
+        guard fd >= 0 else {
+            lastError = lastError ?? "64Forth is not listening — start 64Forth first"
+            appendConsole("Arm: not connected\n")
+            return
+        }
+        lastError = nil
+        if isDebugSessionArmed {
+            send(.armBreakGo)
+            return
+        }
+        let name = (runWord ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        else {
+            lastError = "Arm needs a word to BPGO while idle"
+            appendConsole("Arm: pick a breakpoint or type BPGO <word>\n")
+            return
+        }
+        send(.breakGo(name: name))
+    }
 
     /// F9 / ⌘\: toggle BREAK on a dictionary word via `TOGGLE-BREAK` on the host.
     /// Refuses while DEBUG is paused (host cannot evaluate then).
@@ -223,7 +285,7 @@ final class ForthConnectionManager: NSObject, ObservableObject {
                 self.isConnected = false
                 self.isDebugSessionArmed = false
                 self.debugLocation = nil
-                self.breakpointNames = []
+                self.breakpointEntries = []
                 self.lastError = "64Forth connection closed"
             }
             readSource?.cancel()
@@ -308,8 +370,8 @@ final class ForthConnectionManager: NSObject, ObservableObject {
                 viewMissSeqCounter &+= 1
                 viewMissSeq = viewMissSeqCounter
             }
-        case .breakpoints(let names):
-            breakpointNames = names
+        case .breakpoints(let entries):
+            breakpointEntries = entries
         }
     }
 

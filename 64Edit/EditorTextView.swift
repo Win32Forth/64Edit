@@ -28,8 +28,8 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var topVisibleLine: Int
     /// When 64Forth DEBUG is armed, F-keys (and view-mode letter keys) drive the stepper.
     var isDebugArmed: Bool = false
-    /// Word names currently in the host BREAK table (pale-red wash).
-    var breakpointNames: [String] = []
+    /// BREAK-table slots from the host (enabled = pale-red, disabled = gray wash).
+    var breakpointEntries: [BreakpointEntry] = []
     var onDebugStepOver: (() -> Void)?
     var onDebugStepInto: (() -> Void)?
     var onDebugStepOut: (() -> Void)?
@@ -45,9 +45,14 @@ struct EditorTextView: NSViewRepresentable {
         NSColor.systemGreen.withAlphaComponent(0.18)
     }
 
-    /// Pale red wash for words currently in the BREAK table.
+    /// Pale red wash for enabled BREAK-table words.
     static var breakpointHighlightColor: NSColor {
         NSColor.systemRed.withAlphaComponent(0.14)
+    }
+
+    /// Gray wash for disabled BREAK-table words (still marked, will not fire).
+    static var breakpointDisabledHighlightColor: NSColor {
+        NSColor.systemGray.withAlphaComponent(0.22)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -136,7 +141,7 @@ struct EditorTextView: NSViewRepresentable {
         }
 
         // BREAK-table wash (independent of DEBUG green).
-        context.coordinator.applyBreakpointWash(names: breakpointNames, force: textChanged)
+        context.coordinator.applyBreakpointWash(entries: breakpointEntries, force: textChanged)
 
         if let line = gotoLine, line > 0 {
             context.coordinator.needsRestore = false
@@ -297,10 +302,10 @@ struct EditorTextView: NSViewRepresentable {
         var needsRestore = false
         /// Character range of the last pastel-green DEBUG token highlight.
         private var debugHighlightRange: NSRange?
-        /// Character ranges painted pale-red for BREAK-table words.
+        /// Character ranges painted for BREAK-table words (red or gray).
         private var breakpointHighlightRanges: [NSRange] = []
-        /// Last applied BREAK name list (skip redundant rewashes).
-        private var lastBreakpointNames: [String] = []
+        /// Last applied BREAK entries (skip redundant rewashes).
+        private var lastBreakpointEntries: [BreakpointEntry] = []
         /// SZ-style 5-column line-number gutter (source editor only).
         weak var lineNumberRuler: LineNumberRulerView?
         private var toggleBreakpointObserver: NSObjectProtocol?
@@ -322,7 +327,7 @@ struct EditorTextView: NSViewRepresentable {
         func clearBreakpointWash() {
             guard let tv = textView, let layout = tv.layoutManager else {
                 breakpointHighlightRanges = []
-                lastBreakpointNames = []
+                lastBreakpointEntries = []
                 return
             }
             let charCount = (tv.string as NSString).length
@@ -334,27 +339,37 @@ struct EditorTextView: NSViewRepresentable {
                 layout.removeTemporaryAttribute(.backgroundColor, forCharacterRange: prev)
             }
             breakpointHighlightRanges = []
-            lastBreakpointNames = []
+            lastBreakpointEntries = []
         }
 
-        /// Whole-word pale-red wash for every occurrence of each BREAK name.
+        /// Whole-word wash for every occurrence of each BREAK name.
+        /// Enabled → pale-red; disabled → gray. Forward-only scan (see Pass 1).
         ///
         /// Must scan forward-only. `forthTokenRange(at:)` backs up from a blank
         /// into the previous token (caret/F9 semantics); using it here left
         /// `idx` on that blank forever → main-thread spin / beach ball.
-        func applyBreakpointWash(names: [String], force: Bool = false) {
+        func applyBreakpointWash(entries: [BreakpointEntry], force: Bool = false) {
             guard let tv = textView else { return }
-            let normalized = names
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            if !force, normalized == lastBreakpointNames { return }
+            let normalized = entries
+                .map {
+                    BreakpointEntry(
+                        name: $0.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                        enabled: $0.enabled
+                    )
+                }
+                .filter { !$0.name.isEmpty }
+            if !force, normalized == lastBreakpointEntries { return }
             clearBreakpointWash()
-            lastBreakpointNames = normalized
+            lastBreakpointEntries = normalized
             guard !normalized.isEmpty, let layout = tv.layoutManager else { return }
             let ns = tv.string as NSString
             let charCount = ns.length
             var painted: [NSRange] = []
-            let nameSet = Set(normalized)
+            var enabledByName: [String: Bool] = [:]
+            for e in normalized {
+                // Later duplicate name wins; host table should be unique.
+                enabledByName[e.name] = e.enabled
+            }
             func isSep(_ c: unichar) -> Bool {
                 c == 32 || c == 9 || c == 10 || c == 13
             }
@@ -368,15 +383,18 @@ struct EditorTextView: NSViewRepresentable {
                 while hi < charCount && !isSep(ns.character(at: hi)) { hi += 1 }
                 let range = NSRange(location: idx, length: hi - idx)
                 let token = ns.substring(with: range)
-                if nameSet.contains(token) {
+                if let enabled = enabledByName[token] {
                     // Do not overwrite the live DEBUG green wash.
                     let overlapsDebug = debugHighlightRange.map {
                         NSIntersectionRange($0, range).length > 0
                     } ?? false
                     if !overlapsDebug {
+                        let color = enabled
+                            ? EditorTextView.breakpointHighlightColor
+                            : EditorTextView.breakpointDisabledHighlightColor
                         layout.addTemporaryAttribute(
                             .backgroundColor,
-                            value: EditorTextView.breakpointHighlightColor,
+                            value: color,
                             forCharacterRange: range
                         )
                         painted.append(range)

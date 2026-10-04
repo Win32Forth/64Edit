@@ -57,16 +57,18 @@ Single `Window("64Edit")` with tabs (not DocumentGroup):
 - **Find / Replace:** Edit → Find… / Find and Replace… / Find Next / Find Previous (`⌘F` / `⌥⌘F` / `⌘G` / `⌘⇧G`), plus Replace / Replace and Find Next / Replace All on the TextEdit-style find bar (no-op while a tab is in browse/view mode)
 - **⌘-click VIEW:** sends sock `viewWord`; on miss or when Forth is disconnected, searches the open file and opens the find bar (`Hyper: not connected` note ends with a CR)
 - Home / End → start/end of line; ⌘-Home / ⌘-End → start/end of file (Shift extends selection)
-- **Debug toolbar** while 64Forth ITC DEBUG/TDBG is armed: Step Over / Into / Out / Continue / Stop
+- **Debug toolbar** while 64Forth ITC DEBUG/TDBG is armed: Breakpoints / Arm / Step Over / Into / Out / Continue / Stop
   - While armed the Forth command field is **disabled** and focus moves to the editor
   - Shortcuts: **F6** over, **F7** into, **F8** out, **F5** / **⌘⇧Y** continue, **Esc** stop
   - In browse mode, Forth letter keys also work (`Space`/`o` over, `i` into, `g` continue, `q` stop)
+  - **Arm** continues until an enabled BREAK hits (sets host `debug_bp_go` then Continue)
 - **View → Browse Mode** (⌘⇧B) toggles browse ↔ Allow Editing (system View menu)
 - Ping reconnects the socket only (never evaluates Forth / WORDS)
+- **Breakpoints** button (console header next to Ping, and on the Debug toolbar): popover lists slots with enable checkbox and delete; Arm is active while paused
 - **DEBUG word highlight:** prefers dbg-map `off`/`len` from sock `debugLocation`; else whole-word name search near the VIEW line with runtime→source aliases. Pastel green wash; clears on next pause or session end.
-- **Pass 1 BREAK toggle:** **F9** / **⌘\\** / Debug → Toggle Breakpoint marks the Forth token under the caret via sock `toggleBreakpoint` → host `TOGGLE-BREAK` (8 xt slots). Pale-red wash for names in `breakpoints(names:)`. Breaks fire under **`BPGO <word>`**, not on toggle alone. Idle only while DEBUG is paused. ⌘\\ is no longer Wrap Lines (hard wrap stays off).
+- **BREAK Pass 1–2:** **F9** / **⌘\\** / Debug → Toggle Breakpoint marks the Forth token under the caret via sock `toggleBreakpoint` → host `TOGGLE-BREAK` (8 xt slots). Sock `breakpoints(entries:)` syncs name+enabled. Wash: enabled pale-red, disabled gray. Idle arming still uses console **`BPGO <word>`**. Toggle is idle-only while DEBUG is paused. ⌘\\ is no longer Wrap Lines (hard wrap stays off).
 
-Still ahead: splits, session restore, Pass 2 BREAK list/clear/disable + gutter, deeper XPC.
+Still ahead: splits, session restore, BREAK gutter marks, idle Arm word picker, deeper XPC.
 
 ## Build
 
@@ -106,4 +108,4 @@ before `xcodebuild` (or use full Xcode). For a DMG, build **Release** and place 
 
 ## Status
 
-Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode. Leave `xcuserdata` unstaged when committing. No release in this push — DMG comes later.
+Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode, Pass 1–2 BREAK (F9/⌘\\, Breakpoints panel, Arm, pale-red/gray wash). Shipped in the dual-app DMG with 64Forth **v1.5.3**. Leave `xcuserdata` unstaged when committing.

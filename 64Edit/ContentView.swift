@@ -38,7 +38,7 @@ struct ContentView: View {
                         tab: tab,
                         fontSize: fontSize,
                         isDebugArmed: forth.isDebugSessionArmed,
-                        breakpointNames: forth.breakpointNames,
+                        breakpointEntries: forth.breakpointEntries,
                         onDebugStepOver: { forth.stepOver() },
                         onDebugStepInto: { forth.stepInto() },
                         onDebugStepOut: { forth.stepOut() },
@@ -183,6 +183,7 @@ struct ContentView: View {
                         .foregroundStyle(.orange)
                 }
                 Spacer()
+                BreakpointsPanelButton(forth: forth)
                 Button("Ping") {
                     forth.ping()
                 }
@@ -286,7 +287,7 @@ private struct TabEditorPane: View {
     @ObservedObject var tab: EditorTab
     var fontSize: Double
     var isDebugArmed: Bool
-    var breakpointNames: [String]
+    var breakpointEntries: [BreakpointEntry]
     var onDebugStepOver: () -> Void
     var onDebugStepInto: () -> Void
     var onDebugStepOut: () -> Void
@@ -346,7 +347,7 @@ private struct TabEditorPane: View {
                     set: { tab.topVisibleLine = $0 }
                 ),
                 isDebugArmed: isDebugArmed,
-                breakpointNames: breakpointNames,
+                breakpointEntries: breakpointEntries,
                 onDebugStepOver: onDebugStepOver,
                 onDebugStepInto: onDebugStepInto,
                 onDebugStepOut: onDebugStepOut,
@@ -356,6 +357,116 @@ private struct TabEditorPane: View {
                 onToggleBreakpoint: onToggleBreakpoint
             )
         }
+    }
+}
+
+/// Popover button: BREAK list with enable/disable/delete + paused Arm.
+private struct BreakpointsPanelButton: View {
+    @ObservedObject var forth: ForthConnectionManager
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "breakpoint")
+                Text(buttonTitle)
+            }
+        }
+        .help("Breakpoints — enable, disable, delete; Arm while paused")
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            BreakpointsPanel(forth: forth)
+                .frame(minWidth: 280, idealWidth: 320, maxHeight: 360)
+                .padding(10)
+        }
+    }
+
+    private var buttonTitle: String {
+        let n = forth.breakpointEntries.count
+        return n == 0 ? "Breakpoints" : "Breakpoints (\(n))"
+    }
+}
+
+/// Shared BREAK table UI for the console header and Debug toolbar.
+private struct BreakpointsPanel: View {
+    @ObservedObject var forth: ForthConnectionManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Breakpoints")
+                    .font(.headline)
+                Spacer()
+                Button("Arm") {
+                    forth.armBreakGo()
+                    EditorFocus.request()
+                }
+                .disabled(!forth.isDebugSessionArmed || !forth.isConnected)
+                .help(
+                    forth.isDebugSessionArmed
+                        ? "Continue until an enabled BREAK hits"
+                        : "While idle, type BPGO <word> in the console"
+                )
+                .controlSize(.small)
+            }
+
+            if forth.breakpointEntries.isEmpty {
+                Text("None — F9 / ⌘\\ toggles BREAK under the caret")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(forth.breakpointEntries, id: \.name) { entry in
+                            BreakpointRow(forth: forth, entry: entry)
+                        }
+                    }
+                }
+            }
+
+            if !forth.isDebugSessionArmed {
+                Text("Arm needs a DEBUG pause. Idle: BPGO <word> runs until a break.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.system(size: 12, design: .monospaced))
+    }
+}
+
+private struct BreakpointRow: View {
+    @ObservedObject var forth: ForthConnectionManager
+    var entry: BreakpointEntry
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { entry.enabled },
+                    set: { forth.setBreakpointEnabled(entry.name, enabled: $0) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .help(entry.enabled ? "Disable (keep slot)" : "Enable")
+            Text(entry.name)
+                .foregroundStyle(entry.enabled ? Color.primary : Color.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button {
+                forth.removeBreakpoint(entry.name)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.red)
+            .help("Delete breakpoint")
+            .controlSize(.small)
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -383,6 +494,12 @@ private struct DebugToolbar: View {
                 .foregroundStyle(accent)
             Text("Debug")
                 .fontWeight(.semibold)
+            BreakpointsPanelButton(forth: forth)
+            Button("Arm") {
+                forth.armBreakGo()
+                EditorFocus.request()
+            }
+            .help("Continue until an enabled BREAK hits")
             Spacer(minLength: 8)
             Button("Step Over") { forth.stepOver() }
                 .keyboardShortcut(Self.f6)
@@ -418,7 +535,7 @@ private struct DebugToolbar: View {
         .onTapGesture { EditorFocus.request() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Debug toolbar")
-        .help("F6 over · F7 into · F8 out · F5/⌘⇧Y continue · Esc stop — click to focus editor")
+        .help("Breakpoints · Arm · F6 over · F7 into · F8 out · F5/⌘⇧Y continue · Esc stop")
     }
 
     private static let f5 = KeyEquivalent(Character(UnicodeScalar(NSF5FunctionKey)!))
