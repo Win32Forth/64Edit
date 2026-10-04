@@ -20,9 +20,9 @@ No special pairing after install. Both apps use the same Application Support pat
 ~/Library/Application Support/64Forth/edit.sock
 ```
 
-If 64Forth is not running, 64Edit reports that the socket is missing. Start 64Forth, then use Ping (reconnect only) or relaunch 64Edit.
+If 64Forth is not running, **Ping** launches the **flavor-matched** `64Forth.app` and retries `edit.sock` (silent when already connected — no pong line). You can also start 64Forth yourself and Ping to reconnect.
 
-**Launch path:** 64Forth finds `64Edit.app` as a **sibling** of `64Forth.app`, or at `/Applications/64Edit.app`. Debug developer builds prefer Xcode DerivedData first. Socket IPC works regardless of where the apps live. When 64Edit is already connected on `edit.sock`, 64Forth skips `/usr/bin/open -a` so the window does not flash/reactivate.
+**Companion launch (flavor match):** Debug builds open the Debug companion (sibling Products folder, then newest DerivedData Debug). Release builds open sibling or `/Applications` only — never a Debug DerivedData build. The same rule applies in both directions (`64Edit` ↔ `64Forth`). When 64Edit is already connected on `edit.sock`, 64Forth skips `/usr/bin/open -a` so the window does not flash/reactivate. Socket IPC works regardless of where the apps live.
 
 Shared IPC types live in `64Edit/IPCProtocol.swift` (mirrored on the 64Forth side as `App/IPCProtocol.swift`).
 
@@ -50,25 +50,28 @@ Single `Window("64Edit")` with tabs (not DocumentGroup):
 - **New File** (`⌘N`): Untitled edit tab from File → New File, the empty-state screen, or the Open panel accessory. Closing the last tab leaves the empty placeholder (no auto-Untitled); cold launch still creates one Untitled when nothing was opened.
 - Open / Save / Save As / Close Tab; dirty mark `•` in the tab title
 - **Dirty close / quit:** Save / Don’t Save / Cancel sheets per modified tab (Untitled uses Save As); window shows the document-edited proxy; last window close quits
-- Shared Forth console over `edit.sock` (thicker splitter; `consolePaneHeight`)
+- Shared Forth console over `edit.sock` (splitter; live height in memory, `consolePaneHeight` saved on drag end; global-coordinate drag so the pane does not oscillate)
 - Pending-goto and `debugLocation` find-or-open by path/inode; nested DEBUG steps open multiple files and restore the prior tab when stepping out
 - Per-tab caret and top visible line on tab switch
-- **Line numbers** (source editor only): SZ / FILE-ECHO style 5-column right-justified gutter
+- **Line numbers** (source editor only): SZ / FILE-ECHO style 5-column right-justified gutter; **View → Show Line Numbers** toggles the ruler (`showLineNumbers`, default on)
 - **Find / Replace:** Edit → Find… / Find and Replace… / Find Next / Find Previous (`⌘F` / `⌥⌘F` / `⌘G` / `⌘⇧G`), plus Replace / Replace and Find Next / Replace All on the TextEdit-style find bar (no-op while a tab is in browse/view mode)
-- **⌘-click VIEW:** sends sock `viewWord`; on miss or when Forth is disconnected, searches the open file and opens the find bar (`Hyper: not connected` note ends with a CR)
+- **⌘-click VIEW:** sends sock `viewWord`; on miss or when Forth is disconnected, searches the open file and opens the find bar (`Hyper: not connected` note ends with a CR). Disconnected ⌘-click does **not** unhide a hidden Forth console.
 - Home / End → start/end of line; ⌘-Home / ⌘-End → start/end of file (Shift extends selection)
 - **Debug toolbar** while 64Forth ITC DEBUG/TDBG is armed: Breakpoints / Arm / Step Over / Into / Out / Continue / Stop
   - While armed the Forth command field is **disabled** and focus moves to the editor
   - Shortcuts: **F6** over, **F7** into, **F8** out, **F5** / **⌘⇧Y** continue, **Esc** stop
   - In browse mode, Forth letter keys also work (`Space`/`o` over, `i` into, `g` continue, `q` stop)
   - **Arm** continues until an enabled BREAK hits (sets host `debug_bp_go` then Continue)
-- **View → Browse Mode** (⌘⇧B) toggles browse ↔ Allow Editing (system View menu)
-- Ping reconnects the socket only (never evaluates Forth / WORDS)
+- **View menu** (system View via `CommandGroup(after: .toolbar)`):
+  - **Browse Mode** (⌘⇧B) toggles browse ↔ Allow Editing
+  - **Show Forth Console** (`showForthChrome`, default on): hides status/Ping/Breakpoints, transcript, command line, splitter, and Debug toolbar for stand-alone editing. Sock still starts. Auto-reveals (and stays shown) on DEBUG arm, console traffic, or `lastError` only when already connected — not on cold Engine-down alone, and not on disconnected ⌘-click.
+  - **Show Line Numbers**
+- **Ping:** reconnect only (never evaluates Forth / WORDS). If `edit.sock` is down, launches flavor-matched 64Forth and retries connect. No `pong` console echo.
 - **Breakpoints** button (console header next to Ping, and on the Debug toolbar): popover lists slots with enable checkbox and delete; Arm is active while paused
 - **DEBUG word highlight:** prefers dbg-map `off`/`len` from sock `debugLocation`; else whole-word name search near the VIEW line with runtime→source aliases. Pastel green wash; clears on next pause or session end.
 - **BREAK Pass 1–2:** **F9** / **⌘\\** / Debug → Toggle Breakpoint marks the Forth token under the caret via sock `toggleBreakpoint` → host `TOGGLE-BREAK` (8 xt slots). Sock `breakpoints(entries:)` syncs name+enabled. Wash: enabled pale-red, disabled gray. Idle arming still uses console **`BPGO <word>`**. Toggle is idle-only while DEBUG is paused. ⌘\\ is no longer Wrap Lines (hard wrap stays off).
 
-Still ahead: splits, session restore, BREAK gutter marks, idle Arm word picker, deeper XPC.
+Still ahead (optional): splits, session restore, BREAK gutter marks, idle Arm word picker, toggle-while-paused, deeper XPC.
 
 ## Build
 
@@ -108,4 +111,6 @@ before `xcodebuild` (or use full Xcode). For a DMG, build **Release** and place 
 
 ## Status
 
-Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode, Pass 1–2 BREAK (F9/⌘\\, Breakpoints panel, Arm, pale-red/gray wash). Shipped in the dual-app DMG with 64Forth **v1.5.3**. Leave `xcuserdata` unstaged when committing.
+Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode, Pass 1–2 BREAK (F9/⌘\\, Breakpoints panel, Arm, pale-red/gray wash). Shipped in the dual-app DMG with 64Forth **v1.5.3**.
+
+**On main since 1.5.3 (unreleased):** View → Show Forth Console / Show Line Numbers; Ping launches flavor-matched 64Forth; smooth console splitter (persist on drag end + global drag coordinates); opaque console transcript. Leave `xcuserdata` unstaged when committing.

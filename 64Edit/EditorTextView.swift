@@ -28,6 +28,8 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var topVisibleLine: Int
     /// When 64Forth DEBUG is armed, F-keys (and view-mode letter keys) drive the stepper.
     var isDebugArmed: Bool = false
+    /// View → Show Line Numbers (AppStorage); vertical ruler on/off.
+    var showLineNumbers: Bool = true
     /// BREAK-table slots from the host (enabled = pale-red, disabled = gray wash).
     var breakpointEntries: [BreakpointEntry] = []
     var onDebugStepOver: (() -> Void)?
@@ -94,8 +96,8 @@ struct EditorTextView: NSViewRepresentable {
         scroll.documentView = tv
         let ruler = LineNumberRulerView(textView: tv)
         scroll.verticalRulerView = ruler
-        scroll.hasVerticalRuler = true
-        scroll.rulersVisible = true
+        scroll.hasVerticalRuler = showLineNumbers
+        scroll.rulersVisible = showLineNumbers
         context.coordinator.lineNumberRuler = ruler
         context.coordinator.textView = tv
         context.coordinator.installCommandClick(on: tv)
@@ -110,6 +112,14 @@ struct EditorTextView: NSViewRepresentable {
         guard let tv = scroll.documentView as? NSTextView else { return }
         if let editor = tv as? EditorNSTextView {
             context.coordinator.installCommandClick(on: editor)
+        }
+
+        if scroll.hasVerticalRuler != showLineNumbers || scroll.rulersVisible != showLineNumbers {
+            scroll.hasVerticalRuler = showLineNumbers
+            scroll.rulersVisible = showLineNumbers
+            if showLineNumbers {
+                context.coordinator.lineNumberRuler?.invalidate()
+            }
         }
 
         let textChanged = tv.string != text

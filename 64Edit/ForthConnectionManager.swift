@@ -58,6 +58,8 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     private var incoming = Data()
     private var debugLocationSeq: UInt = 0
     private var viewMissSeqCounter: UInt = 0
+    /// Cancels an in-flight Ping launch reconnect when Ping is pressed again.
+    private var launchConnectGeneration: UInt = 0
 
     func start() {
         guard fd < 0 else { return }
@@ -109,6 +111,94 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         }
         src.resume()
         readSource = src
+    }
+
+    /// Companion `64Forth.app` matching this editor’s build flavor.
+    /// **Debug:** sibling (same Products folder), then newest DerivedData Debug.
+    /// **Release:** sibling, then `/Applications/64Forth.app` (never Debug DerivedData).
+    private func locateSixtyFourForthApp() -> URL? {
+        let fm = FileManager.default
+
+        func existsApp(_ url: URL) -> URL? {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                return nil
+            }
+            return url
+        }
+
+        let sibling = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("64Forth.app", isDirectory: true)
+        let applications = URL(fileURLWithPath: "/Applications/64Forth.app", isDirectory: true)
+
+        func derivedDataCandidate(config: String) -> URL? {
+            let home = fm.homeDirectoryForCurrentUser
+            let dd = home.appendingPathComponent("Library/Developer/Xcode/DerivedData", isDirectory: true)
+            var candidates: [(url: URL, date: Date)] = []
+            if let dirs = try? fm.contentsOfDirectory(
+                at: dd,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for dir in dirs where dir.lastPathComponent.hasPrefix("64Forth-") {
+                    let app = dir
+                        .appendingPathComponent("Build/Products/\(config)/64Forth.app", isDirectory: true)
+                    guard let url = existsApp(app) else { continue }
+                    let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                    candidates.append((url, vals?.contentModificationDate ?? .distantPast))
+                }
+            }
+            return candidates.sorted(by: { $0.date > $1.date }).first?.url
+        }
+
+        #if DEBUG
+        if let s = existsApp(sibling) { return s }
+        if let dd = derivedDataCandidate(config: "Debug") { return dd }
+        #else
+        if let s = existsApp(sibling) { return s }
+        if let a = existsApp(applications) { return a }
+        #endif
+        return nil
+    }
+
+    /// Launch the flavor-matched 64Forth.app via `/usr/bin/open -a`.
+    @discardableResult
+    private func launchSixtyFourForth() -> Bool {
+        guard let app = locateSixtyFourForthApp() else { return false }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-a", app.path]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// After launching Forth, retry `start()` until sock connects or attempts run out.
+    private func scheduleLaunchConnectRetries() {
+        launchConnectGeneration &+= 1
+        let gen = launchConnectGeneration
+        let delays: [TimeInterval] = [0.4, 0.8, 1.2, 1.6, 2.0, 2.5, 3.0, 4.0, 5.0]
+        for (i, delay) in delays.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.launchConnectGeneration == gen else { return }
+                if self.isConnected { return }
+                if self.fd >= 0 { self.stop() }
+                self.start()
+                if self.isConnected {
+                    self.lastError = nil
+                    return
+                }
+                if i == delays.count - 1 {
+                    self.lastError = self.lastError ?? "64Forth launched but edit.sock not ready"
+                    self.appendConsole("ping: launched 64Forth, still not connected\n")
+                }
+            }
+        }
     }
 
     func stop() {
@@ -235,7 +325,9 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         send(.viewWord(name: name))
     }
 
-    /// Reconnect check only — does not evaluate Forth (safe while DEBUG is paused).
+    /// Reconnect only — never evaluates Forth (safe while DEBUG is paused).
+    /// If edit.sock is down, launches the flavor-matched 64Forth.app (Debug→Debug
+    /// DerivedData/sibling; Release→sibling or `/Applications`) and retries connect.
     func ping() {
         if fd >= 0, !isConnected {
             stop()
@@ -245,13 +337,29 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         }
         if isConnected {
             lastError = nil
-            let note = isDebugSessionArmed ? "pong · debugging" : "pong"
-            appendConsole(note)
-        } else if let err = lastError {
-            appendConsole("ping failed: \(err)")
-        } else {
-            appendConsole("ping failed")
+            return
         }
+
+        #if DEBUG
+        let missingHint = "64Forth Debug not found — build Debug 64Forth"
+        #else
+        let missingHint = "64Forth not found — install beside 64Edit or in /Applications"
+        #endif
+
+        guard locateSixtyFourForthApp() != nil else {
+            lastError = missingHint
+            appendConsole("ping: \(missingHint)\n")
+            return
+        }
+
+        appendConsole("Launching 64Forth…\n")
+        lastError = nil
+        guard launchSixtyFourForth() else {
+            lastError = "failed to launch 64Forth"
+            appendConsole("ping: failed to launch 64Forth\n")
+            return
+        }
+        scheduleLaunchConnectRetries()
     }
 
     func send(_ request: EditorRequest) {

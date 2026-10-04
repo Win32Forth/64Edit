@@ -12,6 +12,8 @@ struct SixtyFourEditApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var workspace = WorkspaceModel()
     @StateObject private var forth = ForthConnectionManager()
+    @AppStorage("showForthChrome") private var showForthChrome = true
+    @AppStorage("showLineNumbers") private var showLineNumbers = true
 
     init() {
         NotificationCenter.default.addObserver(
@@ -107,6 +109,11 @@ struct SixtyFourEditApp: App {
                 }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
                 .disabled(workspace.selectedTab == nil)
+
+                Divider()
+
+                Toggle("Show Forth Console", isOn: $showForthChrome)
+                Toggle("Show Line Numbers", isOn: $showLineNumbers)
             }
             CommandMenu("Format") {
                 Button("Bigger") {

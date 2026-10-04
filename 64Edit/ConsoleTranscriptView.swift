@@ -22,7 +22,9 @@ struct ConsoleTranscriptView: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        scroll.drawsBackground = false
+        // Opaque fill — clear background flashes hard while the splitter resizes.
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .controlBackgroundColor
         scroll.findBarPosition = .aboveContent
 
         let tv = ConsoleNSTextView()
@@ -36,8 +38,8 @@ struct ConsoleTranscriptView: NSViewRepresentable {
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
         tv.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        tv.backgroundColor = .clear
-        tv.drawsBackground = false
+        tv.backgroundColor = .controlBackgroundColor
+        tv.drawsBackground = true
         tv.minSize = NSSize(width: 0, height: 0)
         tv.maxSize = NSSize(
             width: CGFloat.greatestFiniteMagnitude,
@@ -63,7 +65,11 @@ struct ConsoleTranscriptView: NSViewRepresentable {
         context.coordinator.parent = self
         guard let tv = scroll.documentView as? ConsoleNSTextView else { return }
         context.coordinator.installCommandClick(on: tv)
-        tv.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+
+        let wantFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        if tv.font != wantFont {
+            tv.font = wantFont
+        }
 
         let next = Self.joined(lines)
         guard tv.string != next else { return }

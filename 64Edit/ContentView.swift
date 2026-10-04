@@ -13,11 +13,20 @@ struct ContentView: View {
     @EnvironmentObject private var workspace: WorkspaceModel
     @EnvironmentObject private var forth: ForthConnectionManager
     @AppStorage("editorFontSize") private var fontSize = 13.0
-    @AppStorage("consolePaneHeight") private var consoleHeight = 160.0
+    /// Persisted console height — written on drag end / clamp, not every drag tick.
+    @AppStorage("consolePaneHeight") private var storedConsoleHeight = 160.0
+    /// Live split height while dragging (avoids UserDefaults I/O flash per tick).
+    @State private var consoleHeight = 160.0
+    /// View → Show Forth Console (status, transcript, command line, debug toolbar).
+    @AppStorage("showForthChrome") private var showForthChrome = true
+    /// View → Show Line Numbers.
+    @AppStorage("showLineNumbers") private var showLineNumbers = true
     @State private var commandLine = ""
     @State private var gotoObserver: NSObjectProtocol?
     @State private var dragStartHeight: CGFloat?
     @State private var debugKeys = DebugKeyMonitor()
+    /// After cold start settles, allow auto-reveal (do not pop chrome for Engine down alone).
+    @State private var chromeAutoRevealReady = false
 
     private static let consoleMinHeight: CGFloat = 88
     private static let editorMinHeight: CGFloat = 120
@@ -37,6 +46,7 @@ struct ContentView: View {
                     TabEditorPane(
                         tab: tab,
                         fontSize: fontSize,
+                        showLineNumbers: showLineNumbers,
                         isDebugArmed: forth.isDebugSessionArmed,
                         breakpointEntries: forth.breakpointEntries,
                         onDebugStepOver: { forth.stepOver() },
@@ -54,39 +64,51 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                if forth.isDebugSessionArmed {
-                    DebugToolbar(forth: forth)
+                if showForthChrome {
+                    if forth.isDebugSessionArmed {
+                        DebugToolbar(forth: forth)
+                    }
+
+                    ConsoleSplitter(
+                        onDrag: { translationY in
+                            let base = dragStartHeight ?? clampedConsole
+                            if dragStartHeight == nil { dragStartHeight = clampedConsole }
+                            let next = min(
+                                max(base - translationY, Self.consoleMinHeight),
+                                maxConsole
+                            )
+                            consoleHeight = next
+                        },
+                        onEnd: {
+                            dragStartHeight = nil
+                            storedConsoleHeight = consoleHeight
+                        }
+                    )
+
+                    consolePane
+                        .frame(height: clampedConsole)
                 }
-
-                ConsoleSplitter(
-                    onDrag: { translationY in
-                        let base = dragStartHeight ?? clampedConsole
-                        if dragStartHeight == nil { dragStartHeight = clampedConsole }
-                        let next = min(
-                            max(base - translationY, Self.consoleMinHeight),
-                            maxConsole
-                        )
-                        consoleHeight = next
-                    },
-                    onEnd: { dragStartHeight = nil }
-                )
-
-                consolePane
-                    .frame(height: clampedConsole)
             }
             .onChange(of: geo.size.height) { _, _ in
+                guard showForthChrome else { return }
                 if consoleHeight > maxConsole {
                     consoleHeight = maxConsole
+                    storedConsoleHeight = maxConsole
                 }
             }
         }
         .background(WindowChrome(url: workspace.selectedTab?.fileURL))
         .onAppear {
+            consoleHeight = storedConsoleHeight
             installGotoObserver()
             forth.start()
             debugKeys.attach(forth: forth, workspace: workspace)
             // File opens / pending-goto / initial untitled are owned by AppDelegate.attach
             // (runs from SixtyFourEditApp) so we do not create a stray Untitled tab first.
+            // Delay auto-reveal so cold "Engine down" / connect-failed does not force chrome.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                chromeAutoRevealReady = true
+            }
         }
         .onDisappear {
             if let gotoObserver {
@@ -115,10 +137,21 @@ struct ContentView: View {
         }
         .onChange(of: forth.isDebugSessionArmed) { _, armed in
             if armed {
+                revealForthChromeIfNeeded()
                 // Drop console-field focus; DEBUG pauses reject executeCommand anyway.
                 DispatchQueue.main.async { EditorFocus.request() }
             } else {
                 workspace.clearDebugHighlights()
+            }
+        }
+        // Do not reveal on isConnected alone — that would undo Hide on every launch
+        // when 64Forth is already running. Reveal on DEBUG, console traffic, or errors.
+        .onChange(of: forth.consoleLines.count) { _, _ in
+            revealForthChromeIfNeeded()
+        }
+        .onChange(of: forth.lastError) { _, err in
+            if err != nil {
+                revealForthChromeIfNeeded()
             }
         }
         .onChange(of: forth.viewMissSeq) { _, _ in
@@ -128,6 +161,14 @@ struct ContentView: View {
                 FindSupport.searchSource(for: word)
             }
         }
+    }
+
+    /// Persistently show Forth chrome when companion activity arrives while hidden.
+    /// Require an active sock — ⌘-click with Forth down falls back to in-file find
+    /// and must not pop the console (lastError / "Hyper: not connected" note).
+    private func revealForthChromeIfNeeded() {
+        guard chromeAutoRevealReady, !showForthChrome, forth.isConnected else { return }
+        showForthChrome = true
     }
 
     // MARK: - Tab bar
@@ -286,6 +327,7 @@ private struct TabChip: View {
 private struct TabEditorPane: View {
     @ObservedObject var tab: EditorTab
     var fontSize: Double
+    var showLineNumbers: Bool
     var isDebugArmed: Bool
     var breakpointEntries: [BreakpointEntry]
     var onDebugStepOver: () -> Void
@@ -347,6 +389,7 @@ private struct TabEditorPane: View {
                     set: { tab.topVisibleLine = $0 }
                 ),
                 isDebugArmed: isDebugArmed,
+                showLineNumbers: showLineNumbers,
                 breakpointEntries: breakpointEntries,
                 onDebugStepOver: onDebugStepOver,
                 onDebugStepInto: onDebugStepInto,
@@ -572,7 +615,10 @@ private struct ConsoleSplitter: View {
                     }
                 }
                 .gesture(
-                    DragGesture(minimumDistance: 1)
+                    // Global space: the splitter moves in the VStack as console
+                    // height changes; local translation then oscillates (~splitter
+                    // height) and the pane flashes between two sizes.
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { value in
                             onDrag(value.translation.height)
                         }
