@@ -12,12 +12,14 @@ import AppKit
 struct ConsoleTranscriptView: NSViewRepresentable {
     var lines: [String]
     var fontSize: CGFloat = 12
+    /// From `ForthConnectionManager.consoleRefreshSeq` — bumps on successful VIEW.
+    var refreshSeq: UInt = 0
     var onCommandClickWord: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = ConsoleScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
@@ -57,6 +59,7 @@ struct ConsoleTranscriptView: NSViewRepresentable {
 
         scroll.documentView = tv
         context.coordinator.textView = tv
+        context.coordinator.lastRefreshSeq = refreshSeq
         context.coordinator.installCommandClick(on: tv)
         return scroll
     }
@@ -72,13 +75,44 @@ struct ConsoleTranscriptView: NSViewRepresentable {
         }
 
         let next = Self.joined(lines)
-        guard tv.string != next else { return }
+        let refreshBump = refreshSeq != context.coordinator.lastRefreshSeq
+        context.coordinator.lastRefreshSeq = refreshSeq
 
-        let wasNearBottom = Self.isNearBottom(scroll)
-        tv.string = next
-        if wasNearBottom || lines.isEmpty {
+        if tv.string != next {
+            let wasNearBottom = Self.isNearBottom(scroll)
+            let savedOrigin = scroll.contentView.bounds.origin
+            tv.string = next
+            if wasNearBottom || lines.isEmpty {
+                DispatchQueue.main.async {
+                    Self.scrollToEnd(tv)
+                    Self.refreshDisplay(scroll)
+                }
+            } else {
+                // Keep the user's place in a WORDS list (or any scrolled-up view).
+                let clip = scroll.contentView
+                let docHeight = scroll.documentView?.bounds.height ?? 0
+                let maxY = max(0, docHeight - clip.bounds.height)
+                let y = min(max(0, savedOrigin.y), maxY)
+                clip.scroll(to: NSPoint(x: savedOrigin.x, y: y))
+                Self.refreshDisplay(scroll)
+            }
+        } else {
+            // Sibling editor/tab updates often leave the clip view unpainted while
+            // the joined string is unchanged (blank until the user scrolls).
+            Self.refreshDisplay(scroll)
+        }
+
+        // VIEW bumps refreshSeq before pending-goto finishes editor layout —
+        // refresh again after that settle so the transcript stays visible.
+        if refreshBump {
             DispatchQueue.main.async {
-                Self.scrollToEnd(tv)
+                Self.refreshDisplay(scroll)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                Self.refreshDisplay(scroll)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                Self.refreshDisplay(scroll)
             }
         }
     }
@@ -100,9 +134,27 @@ struct ConsoleTranscriptView: NSViewRepresentable {
         tv.scrollRangeToVisible(NSRange(location: len, length: 0))
     }
 
+    /// Re-sync clip view and force a redraw (AppKit often skips paint after a
+    /// sibling editor/tab layout until a scroll event arrives).
+    private static func refreshDisplay(_ scroll: NSScrollView) {
+        scroll.layoutSubtreeIfNeeded()
+        if let tv = scroll.documentView as? NSTextView,
+           let layout = tv.layoutManager,
+           let container = tv.textContainer {
+            layout.ensureLayout(for: container)
+        }
+        scroll.reflectScrolledClipView(scroll.contentView)
+        scroll.contentView.needsDisplay = true
+        scroll.documentView?.needsDisplay = true
+        scroll.needsDisplay = true
+        scroll.displayIfNeeded()
+        scroll.documentView?.displayIfNeeded()
+    }
+
     final class Coordinator {
         var parent: ConsoleTranscriptView
         weak var textView: ConsoleNSTextView?
+        var lastRefreshSeq: UInt = 0
 
         init(_ parent: ConsoleTranscriptView) { self.parent = parent }
 
@@ -111,6 +163,27 @@ struct ConsoleTranscriptView: NSViewRepresentable {
                 self?.parent.onCommandClickWord?(word)
             }
         }
+    }
+}
+
+/// Scroll view that re-syncs its clip after SwiftUI-driven frame changes so the
+/// transcript does not go blank when VIEW updates the editor above.
+final class ConsoleScrollView: NSScrollView {
+    override func setFrameSize(_ newSize: NSSize) {
+        let old = frame.size
+        super.setFrameSize(newSize)
+        guard old != newSize else { return }
+        reflectScrolledClipView(contentView)
+        contentView.needsDisplay = true
+        documentView?.needsDisplay = true
+        needsDisplay = true
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        reflectScrolledClipView(contentView)
+        needsDisplay = true
+        documentView?.needsDisplay = true
     }
 }
 

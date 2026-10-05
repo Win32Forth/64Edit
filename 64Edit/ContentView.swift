@@ -241,6 +241,7 @@ struct ContentView: View {
             ConsoleTranscriptView(
                 lines: forth.consoleLines,
                 fontSize: 12,
+                refreshSeq: forth.consoleRefreshSeq,
                 onCommandClickWord: { word in forth.viewWord(word) }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

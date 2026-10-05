@@ -41,6 +41,9 @@ final class ForthConnectionManager: NSObject, ObservableObject {
     @Published private(set) var viewMissSeq: UInt = 0
     /// Token from the last `viewResult(opened: false)` (empty when none).
     @Published private(set) var viewMissWord: String = ""
+    /// Bumps on successful VIEW so the console transcript can refresh even when
+    /// `consoleLines` are unchanged (editor open/layout left the clip view blank).
+    @Published private(set) var consoleRefreshSeq: UInt = 0
     /// BREAK table slots from the host (pale-red wash uses enabled names).
     @Published private(set) var breakpointEntries: [BreakpointEntry] = []
     /// Enabled BREAK names (pale-red wash).
@@ -470,6 +473,9 @@ final class ForthConnectionManager: NSObject, ObservableObject {
         case .viewResult(let word, let opened):
             if opened {
                 lastError = nil
+                // Editor/tab layout after EDIT-AT can leave the transcript unpainted
+                // until a scroll event — force ConsoleTranscriptView to refresh.
+                consoleRefreshSeq &+= 1
             } else {
                 // Expected miss (undefined or no VIEW stamp) — search the editor.
                 lastError = nil
