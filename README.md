@@ -4,7 +4,7 @@
 
 **64Edit** is the external source editor for **[64Forth](https://github.com/Win32Forth/64Forth)**. As of 64Forth **1.5.2**, the in-app SZ-EDITOR (`Library/Editor`) is removed. Edit Forth sources in 64Edit; 64Forth keeps the Console and App Output windows.
 
-**Version lockstep:** 64Edit’s marketing version and build must match 64Forth. Current: **1.5.3** / build **47**.
+**Version lockstep:** 64Edit’s marketing version and build must match 64Forth. Current: **1.5.4** / build **48**.
 
 Shipped beside **64Forth** in the dual-app DMG (from **1.5.2**). Drag **both** apps into `/Applications` (or keep them in the same folder). Gatekeeper Open Anyway applies once per app.
 
@@ -111,6 +111,4 @@ before `xcodebuild` (or use full Xcode). For a DMG, build **Release** and place 
 
 ## Status
 
-Usable companion for 64Forth **1.5.3** (version lockstep): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode, Pass 1–2 BREAK (F9/⌘\\, Breakpoints panel, Arm, pale-red/gray wash). Shipped in the dual-app DMG with 64Forth **v1.5.3**.
-
-**On main since 1.5.3 (unreleased):** View → Show Forth Console / Show Line Numbers; Ping launches flavor-matched 64Forth; smooth console splitter (persist on drag end + global drag coordinates); opaque console transcript. Leave `xcuserdata` unstaged when committing.
+Usable companion for 64Forth **1.5.4** (version lockstep **1.5.4** / build **48**): tabs, New File, dirty save sheets, line numbers, find / ⌘-click VIEW, DEBUG multi-file follow with span wash, sock steppers, Browse Mode, Pass 1–2 BREAK (F9/⌘\\, Breakpoints panel, Arm, pale-red/gray wash), View → Show Forth Console / Show Line Numbers, Ping launches flavor-matched 64Forth, smooth console splitter (persist on drag end + global drag coordinates; opaque transcript). Shipped in the dual-app DMG with 64Forth **v1.5.4**; standalone `Releases/64Edit-1.5.4-macOS.dmg` also available. Leave `xcuserdata` unstaged when committing.
